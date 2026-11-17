@@ -37,8 +37,10 @@ Items marked "later" are collected in "Deferred to later plans" at the bottom.
 | Server persistence | **One GeoJSON file per route** on the server filesystem, plus a `session.json` per user. |
 | Source of truth | `localStorage` wins over the server. See "Sync rules". |
 | Target area | Hudson County, NJ, with Bergen, Essex (NJ), and Manhattan, Brooklyn, Queens and the Bronx (NY) as its surroundings. No extra buffer beyond those. |
-| Valhalla region | A single **rectangular bounding box** enclosing all of those counties. |
+| Valhalla region | The **union of the county boundaries** listed above, as a polygon (not a rectangle). See "Local Docker setup". |
 | Scale | About 10 to 20 routes per user. |
+| Route numbers | Generated automatically for new and duplicated routes. See "Data model". |
+| Failed server deletes | Accepted. Not retried. |
 | Route direction model | Each route represents **one direction of travel**. See "Route model". |
 | Overlap within a route | A route's paths are drawn identically to a single route. Arrows show direction. |
 | Overlap between routes | Default rendering for now. Handled by a later plan. |
@@ -100,7 +102,11 @@ Notes:
 - Endpoints are derived: the first and last waypoint of the path. They are not stored separately.
 - `number`, `name`, `color` and `kind` are route-level fields duplicated onto each path feature, because GeoJSON has no grouping. The app keeps them in sync when editing.
 - **The route number is the route's identity** within a user's collection. It is used in URLs and file names. It must be file-name safe, for example `^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$`.
-- Changing a route's number is a rename: the new entry is saved and the old one removed, in both `localStorage` and on the server.
+- Changing a route's number is a rename: the new entry is saved and the old one removed, in both `localStorage` and on the server. A rename to a number the user already has is rejected with an error.
+- **Automatic numbering:** a new route (and a duplicated route) gets its number automatically. The user can change it afterward.
+  - The number is the highest integer route number the user has, plus 1 (or `1` if there are none).
+  - If that number is somehow already taken, take the next unused integer instead, and keep going until one is free.
+  - "Already taken" is checked against the user's routes in `localStorage` **and** on the server. Otherwise the replicating `PUT` could overwrite a server-only route.
 - Ownership comes from where the data is stored (the username in the `localStorage` key and server path), not from a property on the feature.
 
 ## Identity, sessions and storage
@@ -154,7 +160,7 @@ Server rules:
 2. **Edits require `localStorage`.** A user edit only succeeds if the route exists in `localStorage`. The edit is applied to the `localStorage` copy first, then replicated to the server (debounced `PUT`).
 3. **Server-only routes are read-only.** A route that exists on the server but not in `localStorage` is displayed read-only. It is never replicated into `localStorage`. This includes the current user's own routes if `localStorage` was cleared or they are on a different browser.
 4. **Duplicate is the way to get an editable copy.** Duplicating a route (from the read-only view) creates a new route in the current user's `localStorage`, which is then replicated to the server.
-5. **Delete** removes the `localStorage` entry and sends a `DELETE` to the server.
+5. **Delete** removes the `localStorage` entry and sends a `DELETE` to the server. If the server `DELETE` fails, that is accepted: there is no retry, and the route may show up as a read-only server-only route on a later load.
 
 ## Views
 
@@ -179,7 +185,7 @@ Notes:
   - For any other user, the views read from the server only.
 - **Composite for the current user:** routes from `localStorage` are shown as editable, and server-only routes are shown with a read-only marker.
 - **Ownership check:** the server refuses `PUT` and `DELETE` for anyone without a valid session for that username. The client also hides edit controls for non-editable routes.
-- **Duplicate:** copies the route's path features with new path and waypoint ids into the current user's `localStorage` and replicates it to the server. If the current user already has a route with the same number, they must pick a different number before saving.
+- **Duplicate:** copies the route's path features with new path and waypoint ids into the current user's `localStorage` and replicates it to the server. The copy gets an automatically generated number (see "Data model"), so there is no prompt and no collision.
 - The edit view is where the Terra Draw interactions are attached. The other two views are read-only and never attach it.
 
 ## Drawing and editing UX
@@ -232,10 +238,13 @@ Click to add waypoints only. There is no freehand drawing.
 - Run Valhalla locally in Docker (for example the `gis-ops/docker-valhalla` image, which builds tiles from `.pbf` files in a mounted folder).
 - **Optimized for the target region.** Do not build tiles for the whole US.
   1. Download the Geofabrik extracts for New Jersey and New York State.
-  2. Clip each to a rectangle with `osmium extract --bbox minLon,minLat,maxLon,maxLat`. The rectangle encloses Hudson, Bergen and Essex Counties, Manhattan (New York County), Brooklyn (Kings County), Queens, and the Bronx. Those counties are the buffer around Hudson County, so no extra margin is added. Starting value (approximate, to be tightened against real county boundaries): `-74.42,40.54,-73.70,41.13`. The rectangle will also include some neighboring areas (parts of Staten Island, Union, Passaic and Rockland Counties, Westchester, and Nassau), which is acceptable.
+  2. Clip each to the region polygon with `osmium extract --polygon region.geojson`. The polygon is the union of the seven county boundaries, with no extra margin. Those counties are the buffer around Hudson County.
+     - Build `region.geojson` with a script in `infra/valhalla/`: download the US Census **TIGER/Line** county boundaries, keep the seven counties by FIPS code, and dissolve them into one polygon.
+     - Use the full TIGER/Line files, **not** the shoreline-clipped "cartographic boundary" files. TIGER/Line counties include the water out to the state line, so the polygon stays contiguous across the Hudson and East Rivers. Shoreline-clipped polygons would cut off the bridges and tunnels between New Jersey and Manhattan, and between Manhattan and the other boroughs, which would break routing across them.
+     - `osmium extract` keeps ways that cross the boundary whole by default, so streets at the edge are not truncated.
   3. Merge the clipped files into one `.pbf` and mount it into the container.
 - Check in the scripts and a `docker-compose.yml` for this, but not the data or tiles. Keep those in a git-ignored folder.
-- County names for boundary lookups: "Manhattan" is New York County, "Brooklyn" is Kings County. Queens and the Bronx are Queens County and Bronx County.
+- Counties and FIPS codes: Hudson `34017`, Bergen `34003`, Essex `34013` (NJ); New York County (Manhattan) `36061`, Kings County (Brooklyn) `36047`, Queens `36081`, Bronx `36005` (NY).
 
 ### Router interface
 
@@ -274,7 +283,7 @@ src/
     RouteList.svelte
     RouteEditor.svelte    number / name / color / kind form
 infra/
-  valhalla/         docker-compose.yml and extract scripts
+  valhalla/         docker-compose.yml, region boundary script, and extract scripts
 data/               server-side files (git-ignored)
 ```
 
@@ -283,7 +292,7 @@ data/               server-side files (git-ignored)
 1. **Scaffold:** SvelteKit + TypeScript managed with Bun and `svelte-adapter-bun`, with MapLibre showing the OpenFreeMap basemap centered on Hudson County.
 2. **Identity, session and storage:** hardcoded identity modules, session cookie, `session.json`, `localStorage` store, and the server endpoints writing to `data/{username}/`.
 3. **Edit view, straight lines:** click to add waypoints, derive a `LineString` using the straight-line `Router`, and render it with a color.
-4. **Route metadata:** number, name, color and kind (loop / point-to-point). Route list with select and delete. Enforce unique numbers.
+4. **Route metadata:** number, name, color and kind (loop / point-to-point). Automatic numbering for new routes. Route list with select and delete. Reject duplicate numbers on rename.
 5. **Labels and arrows:** route number and direction arrows rendered along each path.
 6. **Waypoint editing:** drag, insert and delete waypoints. Enforce loop and endpoint invariants.
 7. **Sync rules:** replicate edits to the server, `localStorage` wins, server-only routes shown read-only.
@@ -294,9 +303,7 @@ data/               server-side files (git-ignored)
 
 ## Open questions
 
-- **Duplicate collisions:** when the duplicated route's number already exists in the current user's collection, should the app prompt for a new number or auto-suffix one (for example `42-2`)?
-- **Delete replication:** if the server `DELETE` fails (for example the server is down), the route would reappear as a read-only server-only route on the next load. Acceptable, or retry later?
-- **Valhalla bounding box:** tighten the rectangle against real county boundaries.
+None at the moment.
 
 ## Deferred to later plans
 
