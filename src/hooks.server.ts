@@ -1,11 +1,23 @@
+import { building, dev } from '$app/env';
 import type { RequestEvent } from '@sveltejs/kit';
-import type { Handle } from '@sveltejs/kit/hooks';
-import { SESSION_COOKIE, username } from '#lib/server/identity.ts';
-import { createSession, isValidSession } from '#lib/server/storage.ts';
+import type { Handle, ServerInit } from '@sveltejs/kit/hooks';
+import { allowDevSecret, getSecret } from '#lib/server/jwt.ts';
 
-const THIRTY_DAYS = 60 * 60 * 24 * 30;
+/** The cookie the old session scheme used. Sessions are gone; see plan/jwt.md. */
+const LEGACY_SESSION_COOKIE = 'sessionId';
 
-/** Only real page loads issue sessions: not /api calls, not favicon or other asset requests. */
+// Only the dev server may invent a signing secret. Everything else must configure one.
+allowDevSecret(dev);
+
+/**
+ * Loads the token signing secret when the server initializes, so a missing `YABUS_JWT_SECRET`
+ * fails loudly instead of on the first sign-up. Skipped while SvelteKit is building.
+ */
+export const init: ServerInit = async () => {
+	if (!building) await getSecret();
+};
+
+/** A real page load, not an /api call or an asset request such as the favicon. */
 function isPageRequest(event: RequestEvent): boolean {
 	return (
 		event.request.method === 'GET' &&
@@ -15,21 +27,10 @@ function isPageRequest(event: RequestEvent): boolean {
 }
 
 export const handle: Handle = async ({ event, resolve }) => {
-	let sessionId = event.cookies.get(SESSION_COOKIE);
-
-	// No usable session (first visit, expired after 30 days, cleared, or its directory is gone):
-	// generate a new ULID and a new session directory. Existing sessions are never touched.
-	if (isPageRequest(event) && !(sessionId && (await isValidSession(username, sessionId)))) {
-		sessionId = await createSession(username);
-		event.cookies.set(SESSION_COOKIE, sessionId, {
-			path: '/',
-			httpOnly: true,
-			sameSite: 'lax',
-			maxAge: THIRTY_DAYS
-			// `secure` is left to SvelteKit's default: on, except for http://localhost.
-		});
+	// Clear the old session cookie the first time a page request carries it. Nothing reads it any
+	// more, and this stops browsers from sending it forever.
+	if (isPageRequest(event) && event.cookies.get(LEGACY_SESSION_COOKIE) !== undefined) {
+		event.cookies.delete(LEGACY_SESSION_COOKIE, { path: '/' });
 	}
-
-	event.locals.sessionId = sessionId;
 	return resolve(event);
 };

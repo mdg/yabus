@@ -3,10 +3,7 @@
 declare global {
 	namespace App {
 		// interface Error {}
-		interface Locals {
-			/** The current session ID (a ULID), set by hooks.server.ts. */
-			sessionId?: string;
-		}
+		// interface Locals {}
 		// interface PageData {}
 		// interface PageState {}
 		// interface Platform {}

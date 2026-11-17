@@ -10,7 +10,7 @@
 	},
 	"scripts": {
 		"dev": "vite dev",
-		"start": "bun build/index.js",
+		"start": "bun scripts/start.ts",
 		"test": "bun test",
 		"build": "vite build",
 		"preview": "vite preview",
@@ -29,6 +29,7 @@
 		"vite": "^8.3.8"
 	},
 	"dependencies": {
+		"jose": "^6.2.17",
 		"maplibre-gl": "^6.19.0",
 		"ulid": "^3.0.2"
 	}

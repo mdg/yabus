@@ -1,67 +1,59 @@
-import { error, json } from '@sveltejs/kit';
+import { json } from '@sveltejs/kit';
 import { parseRoute } from '#lib/geo/route.ts';
-import { toHttpError } from '#lib/server/api.ts';
+import { readJsonBody, toResponse } from '#lib/server/api.ts';
+import { authorizeRequest } from '#lib/server/auth.ts';
 import {
-	authorizeSession,
 	checkRouteNumber,
 	deleteRoute,
-	findReadDir,
 	readRoute,
+	StorageError,
 	writeRoute
 } from '#lib/server/storage.ts';
-import { SESSION_COOKIE } from '#lib/server/identity.ts';
+import { getUser, userDir } from '#lib/server/users.ts';
 import type { RequestHandler } from './$types';
 
 const MAX_BODY_BYTES = 1_000_000;
 
-/** A route's GeoJSON (public). Reads the first matching session directory. */
+/** A route's GeoJSON (public). */
 export const GET: RequestHandler = async ({ params }) => {
 	try {
 		checkRouteNumber(params.routeNumber);
-		const dir = await findReadDir(params.username);
-		const route = dir ? await readRoute(dir, params.routeNumber) : null;
-		if (!route) error(404, 'route not found');
+		const user = await getUser(params.username);
+		const route = user ? await readRoute(userDir(user.username), params.routeNumber) : null;
+		if (!route) throw new StorageError(404, 'route not found');
 		return json(route, { headers: { 'content-type': 'application/geo+json' } });
 	} catch (e) {
-		toHttpError(e);
+		return toResponse(e);
 	}
 };
 
-/** Creates or replaces a route in the caller's own session directory. */
-export const PUT: RequestHandler = async ({ params, request, cookies }) => {
+/**
+ * Creates or replaces a route. Needs `Authorization: Bearer <token>` for the user in the path.
+ * Writes only into that user's own directory, taken from the verified record.
+ */
+export const PUT: RequestHandler = async ({ params, request }) => {
 	try {
-		// Authorize first, before reading the body or touching any file.
-		const dir = await authorizeSession(params.username, cookies.get(SESSION_COOKIE));
+		// Authenticate first, before reading the body or touching any file.
+		const user = await authorizeRequest(request, params.username);
 		checkRouteNumber(params.routeNumber);
 
-		const declared = Number(request.headers.get('content-length') ?? 0);
-		if (declared > MAX_BODY_BYTES) error(413, 'route too large');
-		const text = await request.text();
-		if (text.length > MAX_BODY_BYTES) error(413, 'route too large');
+		const parsed = parseRoute(await readJsonBody(request, MAX_BODY_BYTES), params.routeNumber);
+		if (!parsed.ok) throw new StorageError(422, parsed.errors.join('; '));
 
-		let body: unknown;
-		try {
-			body = JSON.parse(text);
-		} catch {
-			error(400, 'body is not valid JSON');
-		}
-		const parsed = parseRoute(body, params.routeNumber);
-		if (!parsed.ok) error(422, parsed.errors.join('; '));
-
-		await writeRoute(dir, params.routeNumber, parsed.route);
+		await writeRoute(userDir(user.username), params.routeNumber, parsed.route);
 		return new Response(null, { status: 204 });
 	} catch (e) {
-		toHttpError(e);
+		return toResponse(e);
 	}
 };
 
-/** Deletes a route from the caller's own session directory. Missing routes are not an error. */
-export const DELETE: RequestHandler = async ({ params, cookies }) => {
+/** Deletes a route. Same authorization as PUT. Deleting a route that is not there is not an error. */
+export const DELETE: RequestHandler = async ({ params, request }) => {
 	try {
-		const dir = await authorizeSession(params.username, cookies.get(SESSION_COOKIE));
-		await deleteRoute(dir, params.routeNumber);
+		const user = await authorizeRequest(request, params.username);
+		await deleteRoute(userDir(user.username), params.routeNumber);
 		return new Response(null, { status: 204 });
 	} catch (e) {
-		toHttpError(e);
+		return toResponse(e);
 	}
 };

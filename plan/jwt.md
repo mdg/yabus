@@ -258,10 +258,16 @@ For a write, the user name in the URL path must be the token's user (`403` if no
 
 ### Secret
 
-- `YABUS_JWT_SECRET`: at least 32 random bytes, base64. Required in production; the server
-  **refuses to start** in production without it.
-- In development, if unset, generate a random secret once and keep it in `data/.jwt-secret`
-  (mode `0600`, git-ignored) so tokens survive restarts.
+- `YABUS_JWT_SECRET`: at least 32 random bytes, base64 (`openssl rand -base64 32`). **Required
+  everywhere except the dev server**, and the server **refuses to start** without it (the
+  built server crashes at startup with a clear message; `bun run start` checks first and exits
+  cleanly).
+- Only `vite dev` may invent a secret: if `YABUS_JWT_SECRET` is unset it generates one once and
+  keeps it in `data/.jwt-secret` (mode `0600`, git-ignored) so tokens survive restarts.
+- **Do not decide this from `NODE_ENV`.** The production build inlines `process.env.NODE_ENV` and
+  strips such checks out of the server bundle, so a `NODE_ENV` test silently stops working
+  there. (This was found by testing the built server; unit tests on the source did not show it.)
+  The rule is instead "a dev secret is allowed only when SvelteKit's `dev` flag is true".
 - Changing the secret invalidates every token. With no way to sign back in, that means locking
   everyone out, so the secret must be **backed up and not rotated casually**.
 
@@ -282,6 +288,9 @@ For a write, the user name in the URL path must be the token's user (`403` if no
   never from the URL or the body.
 - `401` (with `WWW-Authenticate: Bearer`) for a missing, malformed, expired or otherwise invalid
   token. `403` for a valid token whose user does not own the path.
+- **Every `POST`, `PUT` and `DELETE` must send `content-type: application/json`**, including
+  `POST /api/session/renew` (which has no body). SvelteKit's CSRF guard otherwise rejects it
+  with a `403` before our code runs. The client must set this header on every such request.
 - No CORS headers are added; the API is same-origin only. Tokens are never logged.
 
 ### Renewal
@@ -384,6 +393,9 @@ The old `sessionId` cookie is cleared (`Max-Age=0`) the first time a page reques
 then that code is deleted.
 
 ## Milestones
+
+Milestones 1 and 2 are **done**. The client does not use tokens yet (milestone 3), so until
+then the app works locally but its saves to the server get `401`.
 
 1. **Users and tokens (server, no endpoints yet):** user store with ULID IDs, the sign-up
    steps (validation, reserved names, atomic `mkdir`, `user.json`), secret handling, sign and

@@ -1,14 +1,16 @@
 import { json } from '@sveltejs/kit';
 import { routeSummary } from '#lib/geo/route.ts';
-import { toHttpError } from '#lib/server/api.ts';
-import { findReadDir, listRouteNumbers, readRoute } from '#lib/server/storage.ts';
+import { toResponse } from '#lib/server/api.ts';
+import { listRouteNumbers, readRoute } from '#lib/server/storage.ts';
+import { getUser, userDir } from '#lib/server/users.ts';
 import type { RequestHandler } from './$types';
 
-/** Lists a user's routes (public). Reads the first matching session directory. */
+/** Lists a user's routes (public). An unknown user has no routes. */
 export const GET: RequestHandler = async ({ params }) => {
 	try {
-		const dir = await findReadDir(params.username);
-		if (!dir) return json([]);
+		const user = await getUser(params.username);
+		if (!user) return json([]);
+		const dir = userDir(user.username);
 		const summaries = [];
 		for (const number of await listRouteNumbers(dir)) {
 			const route = await readRoute(dir, number);
@@ -16,6 +18,6 @@ export const GET: RequestHandler = async ({ params }) => {
 		}
 		return json(summaries);
 	} catch (e) {
-		toHttpError(e);
+		return toResponse(e);
 	}
 };

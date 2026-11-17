@@ -1,9 +1,9 @@
 import type { PathFeature, Position, RouteCollection, Waypoint } from './types.ts';
 
-/** File-name safe. Used for route numbers, usernames and the file names derived from them. */
+/** File-name safe. Used for route numbers and the file names derived from them. */
 export const SAFE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/;
 export const ROUTE_NUMBER_RE = SAFE_NAME_RE;
-export const USERNAME_RE = SAFE_NAME_RE;
+export { USERNAME_RE } from './username.ts';
 const COLOR_RE = /^#[0-9a-fA-F]{6}$/;
 
 export type ParseResult =
