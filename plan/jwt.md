@@ -1,0 +1,355 @@
+# yabus: Authentication with a session JWT
+
+Replaces the session ID cookie and per-session directories described in
+"Identity, sessions and storage" of [mvp.md](mvp.md) with:
+
+- a **session JWT** that the client stores and sends with every request that changes data, and
+- **user records on the server** that hold a user name and a user ID (a ULID).
+
+Login itself (credentials, sign-up) is still a separate, later plan. This plan builds the token
+machinery and leaves one clearly marked place for login to plug in.
+
+## Why change it
+
+The current scheme has problems that come from a session being a *directory*:
+
+- Every browser that loads a page without a cookie gets a **new session and a new directory**.
+  Anyone who can reach the server can create unlimited directories.
+- One user ends up with many session directories. Reads use the oldest one, writes go to the
+  newest, so routes written by a newer session can be invisible to server reads.
+- Losing the cookie (expiry, cleared data) means losing the identity that owned the files.
+- Issuing a session on *page loads* (and telling pages from assets by looking at `Accept`
+  headers) is a hack.
+
+With a user ID, identity belongs to a **user**, not to a browser session. Any number of tokens,
+from any number of browsers, can belong to the same user and write to the same place.
+
+## Goals
+
+- Remove the session ID, the `sessionId` cookie, `session.json` and the
+  `data/{username}-{sessionId}/` directories.
+- Identify a user by a ULID **user ID**, saved on the server together with the user name.
+- Prove who is calling with a signed, expiring **JWT**, stored by the client in `localStorage`
+  and sent in an `Authorization` header.
+- Check the token on every server write, in one shared place.
+- Keep public reads (`GET`) unauthenticated, as today.
+
+## Non-goals
+
+- Login, passwords, sign-up, OAuth. Another plan will gate token issuance.
+- Roles, permissions, sharing routes between users.
+- Refresh tokens and token rotation (see "Deferred").
+- Changing how routes are stored as GeoJSON or how the sync rules work.
+
+## Can the client keep the JWT in `localStorage`? Is that secure?
+
+**Yes, it can, and this plan does it.** Whether it is *secure* depends on what you are
+protecting against, so here is the honest picture.
+
+### What `localStorage` protects against, and what it does not
+
+- **It does not protect against cross-site scripting (XSS).** Any JavaScript that runs on the
+  app's page can read `localStorage`. That includes a script injected through an XSS bug, and
+  any compromised dependency (this app bundles `svelte`, `maplibre-gl` and others), and
+  browser extensions that can read the site. A stolen token can be copied off the machine and
+  used from anywhere until it expires. This is the main weakness.
+- **It does avoid cross-site request forgery (CSRF).** The browser never attaches
+  `localStorage` data to a request by itself, so another website cannot trick the browser
+  into sending the token. Cookies have to be defended against this; `localStorage` tokens do
+  not.
+- **It is scoped to the origin** (scheme, host and port). Other sites cannot read it.
+- **A JWT is signed, not encrypted.** Anyone holding the token can read its contents. Put
+  nothing secret in it.
+- **It is only as private as the network.** Outside `localhost`, the app must be served over
+  HTTPS, or the token can be read in transit.
+
+### Comparison
+
+| | `localStorage` + `Authorization` header | `HttpOnly` cookie |
+|---|---|---|
+| Readable by page JavaScript (XSS can steal it) | **Yes** | No |
+| Can XSS still act as the user while the page is open | Yes | Yes |
+| CSRF risk | None | Needs `SameSite` plus other checks (already in place) |
+| Survives restarts and works across tabs | Yes | Yes |
+| Server needs to issue it on page loads | No | Yes (the current hack) |
+| Client can read its own user name | Yes (decode the token) | Needs a separate call |
+| Works for non-browser clients | Yes | Awkward |
+
+An `HttpOnly` cookie is the **more secure** place against XSS, because script cannot read it.
+The usual best practice is a short-lived token held in memory plus a refresh token in an
+`HttpOnly` cookie. That is more machinery than this app needs right now.
+
+### Decision
+
+Store the token in `localStorage`, as requested. This is a reasonable trade for this app:
+
+- What the token can do is limited to editing that user's bus routes. Nothing sensitive (no
+  passwords, no payment or personal data) sits behind it.
+- The routes themselves already live in `localStorage`, so XSS can already read them.
+- It removes the CSRF surface and the "issue a session on every page load" behavior.
+
+The risk is accepted, and it is **reduced** by the mitigations in "Hardening" below. If the app
+ever holds anything sensitive, move the token to an `HttpOnly` cookie (open question 3) before
+doing so.
+
+## Design
+
+### Users
+
+A user has a **user ID** (a ULID, generated by the server, never reused) and a **user name**
+(unique, compared case-insensitively, matching the existing file-name-safe pattern).
+
+```
+data/                                   (git-ignored)
+  .jwt-secret                           dev-only signing secret, mode 0600 (see "Secret")
+  {userId}/
+    user.json                           { "userId": "...", "username": "...", "createdAt": "...", "tokensValidAfter": "..." }
+    {routeNumber}.geojson               one file per route, as today
+```
+
+- The directory is named by **user ID only**. The user name appears in URLs (`/u/{username}`)
+  and is looked up, never used as a path.
+- Looking up a user by name: the server keeps an in-memory index of `username -> userId`, built
+  by reading each `data/*/user.json` at start-up and updated when a user is created. At 10s of
+  users this is trivial.
+- The user ID is **not a secret** (it is in file paths and in the token). Never rely on it
+  being hard to guess.
+- A user name is unique, so the old "several directories for one name, use the first one"
+  rule goes away. There is exactly one place to read from and write to.
+
+### The token
+
+A standard JWT, signed with **HS256** using a server-held secret.
+
+```jsonc
+// header
+{ "alg": "HS256", "typ": "JWT" }
+// payload
+{
+  "iss": "yabus",
+  "aud": "yabus",
+  "sub": "01J8ZQ...",        // the user ID (ULID). This is the authority.
+  "username": "demo",        // for display and URLs only; never used for authorization
+  "iat": 1731900000,
+  "exp": 1734492000,         // 30 days after iat, matching the old cookie's lifetime
+  "jti": "01J8ZR..."         // a ULID per token, for logs
+}
+```
+
+Use the `jose` library for signing and verifying. Do not hand-roll JWT handling.
+
+**Verification rules** (all must pass, otherwise `401`):
+
+1. Signature valid, and the algorithm is **exactly `HS256`**. The `none` algorithm and any other
+   algorithm are rejected (this blocks algorithm-confusion attacks).
+2. `exp` in the future, `iss` and `aud` equal `yabus` (small clock tolerance, about 30 s).
+3. `sub` is a well-formed ULID and a user with that ID exists.
+4. The `username` claim equals that user's current user name. A mismatch means the token is
+   stale, so it is rejected.
+5. `iat` is not earlier than the user's `tokensValidAfter`. This is how tokens are revoked
+   (see "Revocation").
+
+Then, for a write, the user name in the URL path must belong to the token's user (`403` if not).
+
+### Secret
+
+- `YABUS_JWT_SECRET`: at least 32 random bytes, base64. Required in production; the server
+  **refuses to start** in production without it.
+- In development, if it is unset, generate a random secret once and keep it in
+  `data/.jwt-secret` (mode `0600`, git-ignored) so tokens survive restarts.
+- Changing the secret invalidates every token. That is acceptable: clients just get a new one.
+
+### Getting a token (the login hook)
+
+`POST /api/session` is the single place a token is issued. Today it takes no credentials and
+issues a token for the hardcoded user name, creating that user (with a new ULID) the first
+time. When the login plan arrives, this endpoint is where credentials get checked.
+
+| | |
+|---|---|
+| Request | `POST /api/session`, no body (for now) |
+| Response `200` | `{ "token": "<jwt>", "expiresAt": "<ISO time>", "user": { "userId": "...", "username": "..." } }` |
+| Existing user | Same user ID is returned every time. Clearing browser data and getting a new token gives the same identity and the same routes. |
+
+**This is a security step backwards unless it is guarded.** Today a new session can only write
+into its *own* new directory. With one user ID and open issuance, anyone who can reach the
+server could mint a token for `demo` and overwrite or delete its routes. So, until login
+exists, issuance is guarded:
+
+- it only works when `YABUS_DEV_LOGIN=1` is set (`bun run dev` sets it; `bun run start`
+  needs it set explicitly), **and**
+- the request must come from a loopback address.
+
+Without the flag it responds `404`. The existing rule stands: do not expose the server beyond
+localhost before the login plan lands. Note the loopback check is not reliable behind a reverse
+proxy, which is why the explicit flag is also required.
+
+### Sending the token (server side of a write)
+
+- `PUT` and `DELETE` require `Authorization: Bearer <jwt>`.
+- One shared helper, `authorizeRequest(request, usernameFromPath)`, does all the checks above and
+  returns the user. Every write endpoint calls it first, before reading the body or touching a
+  file. A new write endpoint cannot skip it.
+- The write directory is **always `data/{token.sub}/`**, derived from the verified token. It is
+  never taken from the URL or the body.
+- Status codes: `401` (with `WWW-Authenticate: Bearer`) for a missing, malformed, expired or
+  otherwise invalid token; `403` for a valid token whose user does not own the path. This
+  replaces the current "`403` for everything".
+- Reads stay public: `GET /api/users/{username}/routes[/{n}]` look the user up by name and read
+  `data/{userId}/`. A name with no user returns an empty list / `404`.
+- No CORS headers are added. The API is same-origin only.
+- Tokens are never logged.
+
+### Client side
+
+- **Storage:** `localStorage` key `yabus:token:v1` holds the raw token. Reads and writes are
+  wrapped in try/catch (private windows, blocked storage); the app works without storage, it
+  just asks for a new token on each page load.
+- **`src/lib/auth/token.ts`:** get, set and clear the token; decode the payload (without
+  verifying; the client cannot and need not verify) to read the user name and expiry.
+- **`ensureToken()`:** if there is no token, or it expires within about a minute, call
+  `POST /api/session` and store the result. Only one request is ever in flight; callers share
+  its promise.
+- **`authFetch(input, init)`:** adds the `Authorization` header. On a `401` it clears the token,
+  gets a new one **once**, and retries **once**. The replicator's `PUT` and `DELETE` use it.
+  Public `GET`s keep using plain `fetch`.
+- **Page unload:** the flush on `pagehide` is best effort. It reads the token synchronously and
+  sends with `keepalive`; if the token is missing or expired at that moment it just skips.
+- **Identity:** the client's idea of "the current user" comes from the token's `username`
+  claim instead of the hardcoded constant. The root layout waits for `ensureToken()` before it
+  renders the app, so everything downstream can read the user name synchronously.
+- The `localStorage` route keys stay `yabus:route:v1:{username}:{routeNumber}` (open question 4).
+
+### Revocation
+
+JWTs are stateless, so the server cannot "delete" one. Instead each user has a
+`tokensValidAfter` time in `user.json`. Any token issued before it is rejected. Setting it to
+"now" signs the user out everywhere (for example if a token is thought to be stolen).
+
+- Phase 1 (this plan): the field, the check, and an admin script `bun run revoke <username>`.
+- Client "sign out" just deletes the stored token.
+
+## Hardening (the `localStorage` mitigations)
+
+Because script on the page can read the token, the main defence is keeping untrusted script
+off the page:
+
+- **No raw HTML from data.** Svelte escapes text by default. Do not use `{@html}`, `innerHTML`
+  or similar with anything that comes from a route (names, user names, numbers). Add a lint
+  or test that fails on `{@html` in `src/`.
+- **Content Security Policy** via SvelteKit's `csp` option: scripts from the app only (no
+  inline script, no `eval`), `connect-src` limited to the app and `tiles.openfreemap.org`,
+  `object-src 'none'`, `base-uri 'self'`, `frame-ancestors 'none'`. MapLibre needs
+  `worker-src blob:` and `img-src data: blob:`. The exact list needs testing against the
+  map, so treat it as a starting point and verify the map still loads.
+- **Dependency hygiene:** keep `bun.lock` committed, install with `--frozen-lockfile` in CI,
+  review dependency updates.
+- **HTTPS** for anything beyond localhost.
+- **Short-ish lifetime** (30 days here; open question 2).
+- **Minimal claims** and no secrets in the token.
+
+## What changes in the code
+
+Remove:
+
+- `src/hooks.server.ts` session issuing; `SESSION_COOKIE`; `createSession`, `authorizeSession`,
+  `isValidSession`, `findReadDir`, `ULID_RE` use for sessions; `locals.sessionId`.
+- `session.json` and the `data/{username}-{sessionId}/` layout.
+- The "known gap" about unlimited directories (no more directories per visit).
+
+Add:
+
+- `src/lib/server/users.ts`: user store (create, lookup by ID and by name, unique names, index).
+- `src/lib/server/jwt.ts`: sign and verify with `jose`, secret loading.
+- `src/lib/server/auth.ts`: `authorizeRequest`.
+- `src/routes/api/session/+server.ts`: token issuance.
+- `src/lib/auth/token.ts`, `src/lib/auth/authFetch.ts`: client token handling.
+
+Change:
+
+- `src/lib/server/storage.ts`: directories keyed by user ID; route file functions stay.
+- The route endpoints: `Authorization` instead of the cookie; `401`/`403` split; reads by user name.
+- `src/lib/identity.ts`: derived from the token.
+- `src/lib/sync/replicator.ts`: sends through `authFetch`.
+- `src/routes/+layout.svelte`: wait for the token before rendering and before `reconcile`.
+- The "Identity, sessions and storage" and "Server filesystem" sections of `plan/mvp.md`, once
+  this plan is done.
+
+### Existing data
+
+There is nothing to migrate for real. The routes in `localStorage` are the source of truth and
+the load-time reconcile copies them to the new `data/{userId}/` on the first page load. Old
+`data/{username}-{sessionId}/` directories are ignored and can be deleted. The only thing
+lost is routes that exist on the server alone (made in another browser) in the dev data. If
+that matters, a one-off script can merge them (open question 5).
+
+The old `sessionId` cookie is cleared (`Max-Age=0`) the first time a page request carries it,
+then that code is deleted.
+
+## Milestones
+
+1. **Users and tokens (server, no endpoints yet):** user store with ULID IDs and unique names,
+   secret handling, sign and verify with `jose`, `authorizeRequest`. Unit tests.
+2. **Endpoints:** `POST /api/session` with the dev guard; switch `PUT`/`DELETE` to bearer
+   auth with `401`/`403`; reads by user name from `data/{userId}/`; remove the session hook,
+   cookie, session directories and `findReadDir`; clear the legacy cookie.
+3. **Client:** token store, `ensureToken`, `authFetch` with the single retry, identity from the
+   token, layout waits for auth, replicator uses `authFetch`.
+4. **Hardening:** CSP, `{@html}` check, `tokensValidAfter` and the revoke script, docs on
+   HTTPS and the secret.
+5. **Cleanup:** remove dead code and old tests, update `plan/mvp.md`.
+
+## Tests
+
+Server (unit):
+
+- Sign then verify round trip; expired token; wrong secret; tampered payload; `alg: none`;
+  a token signed with a different algorithm; wrong `iss` or `aud`; `sub` that is not a ULID;
+  unknown user; stale `username` claim; `iat` before `tokensValidAfter`.
+- User store: new users get distinct ULIDs; names are unique case-insensitively; the index
+  survives a restart; path-unsafe names are refused.
+- `authorizeRequest`: no header, wrong scheme, garbage token, valid token for another user's
+  path (`403`), valid token for its own path.
+- Route files are only ever written under `data/{token.sub}/`.
+- `POST /api/session`: `404` without the flag; `403`/`404` from a non-loopback address; the
+  same user ID on repeated calls.
+
+Client (unit):
+
+- Expiry detection and payload decoding; storage that throws; a single shared in-flight
+  issuance; `authFetch` retries once on `401` and not twice.
+
+End to end (browser):
+
+- A write without a token gets `401` and creates nothing.
+- A fresh browser gets a token, and its first sync lands in `data/{userId}/`.
+- Deleting the token from `localStorage` and reloading gives a new token for the **same** user
+  and the same routes.
+- An expired token is renewed transparently during an edit.
+- A second browser as the same user sees and edits the same server routes (no more "newest
+  session is invisible").
+- The map still loads with the CSP on.
+
+## Open questions
+
+1. **Directory layout:** `data/{userId}/` as proposed, or `data/{username}-{userId}/` to keep
+   directories readable by a person?
+2. **Lifetime:** keep 30 days (matches the old cookie), or use a shorter token (say 24 hours)
+   and add a renew endpoint? Shorter limits what a stolen token is worth.
+3. **Storage:** is `localStorage` still the choice once login exists, or should it move to an
+   `HttpOnly` cookie (more secure against XSS) when the login plan is written?
+4. **`localStorage` route keys:** keep them keyed by user name, or move to user ID (stable if
+   user names ever become changeable) with a one-time key migration?
+5. **Old server data:** drop it (proposed), or write a one-off script to merge the old session
+   directories into `data/{userId}/`?
+6. **Issuance guard:** is "env flag plus loopback" the right dev-only guard, or would you rather
+   have a single shared dev password in the env?
+
+## Deferred
+
+- **Login and sign-up** (credentials, password hashing, rate limiting the token endpoint).
+- **Refresh tokens / rolling renewal.**
+- **Asymmetric signing** (for example EdDSA), only needed if something other than this server
+  ever has to verify tokens.
+- **Per-device sessions list** and "sign out this device".
+- **Audit log** of token issuance.
