@@ -209,14 +209,15 @@ Identity, sessions and storage
 -   The server (in `hooks.server.ts`) sets a cookie carrying the session ID:
     `Max-Age=2592000` (30 days), `Path=/`, `HttpOnly`, `SameSite=Lax`, and `Secure` in
     production.
--   **Issuing a session:** if a page request has no `sessionId` cookie (first visit, expired
-    after 30 days, or cleared), the server generates a new ULID and sets it as the
+-   **Issuing a session:** if a page request has no valid `sessionId` cookie (first visit,
+    expired after 30 days, cleared, or its session directory is gone), the server generates a new ULID and sets it as the
     `sessionId` cookie. It also creates a **new directory** `data/{username}-{sessionId}/`
     for it, for the hardcoded username.
     - Existing directories and files are never overwritten. If the directory already
       exists (a ULID collision), generate another ULID.
-    - Sessions are issued only on page requests, never on `/api` requests. An API request
-      without a cookie is refused (see below) and never creates a session.
+    - Sessions are issued only on page requests (a `GET` that accepts `text/html`), never
+      on `/api` requests or asset requests such as the favicon. An API request without a
+      cookie is refused (see below) and never creates a session.
 -   Each session directory contains a `session.json` holding that session's ID, for example
     `{ "sessionId": "01J..." }`. It is written once, when the directory is created, and is
     **never overwritten**.
@@ -288,6 +289,11 @@ Server rules:
     session is not visible to server reads while an older session directory exists for the
     same username. This is accepted for now.
 -   Writes are atomic (write to a temp file, then rename).
+-   **Mutating requests must send `content-type: application/json`**, including `DELETE`.
+    SvelteKit's CSRF guard rejects `PUT`/`DELETE` requests that have a form or missing
+    content type unless the `Origin` matches, and the Bun adapter assumes `https` for the
+    origin unless told otherwise, so a plain-http local run would reject them. The client
+    code added in the sync milestone must set this header.
 -   Validate the route invariants server-side before saving.
 
 ### Sync rules
