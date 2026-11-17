@@ -294,7 +294,7 @@ Server rules:
     SvelteKit's CSRF guard rejects `PUT`/`DELETE` requests that have a form or missing
     content type unless the `Origin` matches, and the Bun adapter assumes `https` for the
     origin unless told otherwise, so a plain-http local run would reject them. The client
-    code added in the sync milestone must set this header.
+    code added by the deferred sync work must set this header.
 -   Validate the route invariants server-side before saving.
 
 ### Sync rules
@@ -537,17 +537,14 @@ Milestones
 6.  **Waypoint editing:** insert and delete waypoints. Enforce loop and endpoint
     invariants while doing so. (Dragging, with the loop-closing and two-path endpoint
     rules, was done in milestone 5.)
-7.  **Sync rules:** replicate edits to the server, `localStorage` wins, server-only routes
-    shown read-only.
-8.  **Valhalla:** local Docker setup for the target region, `/api/valhalla/route` proxy,
-    and the Valhalla `Router` with `bus` costing.
-9.  **Return paths:** add a second path to a point-to-point route, with endpoints locked
-    to the first path's.
 10. **Read-only route view and Duplicate.**
-11. **Composite view** of all of a user's routes. (Built ahead of milestones 7 to 10. Until
-    the read-only route view exists in milestone 10, server-only routes in the list have no
-    link, and until the sync milestone replicates edits, the server only has routes that
-    were put there by other means.)
+11. **Composite view** of all of a user's routes. (Built before milestone 10. Until the
+    read-only route view exists, server-only routes in the list have no link, and until the
+    deferred sync work replicates edits, the server only has routes that were put there by
+    other means.)
+
+Milestones 7 (sync rules), 8 (Valhalla) and 9 (return paths) were moved to "Deferred to
+later plans" at the bottom. The numbers of the remaining milestones are unchanged.
 
 Open questions
 --------------
@@ -557,7 +554,23 @@ None at the moment.
 Deferred to later plans
 -----------------------
 
-These were raised during planning but are intentionally not part of this plan.
+These were raised during planning, or moved out of the milestones, and are intentionally not
+part of this plan.
+
+-   **Sync rules and server replication** (was milestone 7). Replicate edits to the server
+    and apply the sync rules: `localStorage` wins, an edit only succeeds if the route is in
+    `localStorage` and is then replicated to the server (debounced `PUT`), server-only
+    routes are shown read-only, and delete and rename replicate too. The client must send
+    `content-type: application/json` on mutating requests. The server endpoints, session
+    check and per-session directories this needs are already in place.
+-   **Valhalla routing** (was milestone 8). Local Docker setup for the target region (the
+    seven-county polygon), the `/api/valhalla/route` proxy, and the Valhalla `Router` with
+    `bus` costing behind the existing `Router` interface. Until then routes are straight
+    lines between waypoints.
+-   **Return paths** (was milestone 9). Add a second path to a point-to-point route, with
+    its endpoints locked to the first path's. The logic that keeps endpoints in sync when
+    dragging, and the rule that blocks deleting endpoints once a return path exists, are
+    already in place and unit-tested; there is no UI to create the second path yet.
 
 -   **Login and accounts.** Replace the hardcoded username, and issue the session ID
     on login instead of on the first page visit.
