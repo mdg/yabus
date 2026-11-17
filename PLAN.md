@@ -51,8 +51,9 @@ Decisions
   Basemap                                      **OpenFreeMap** (free, no API key, no
                                                self-hosting).
 
-  Drawing/editing                              **Terra Draw** (MapLibre adapter) for
-                                               interaction. Click to add waypoints only.
+  Drawing/editing                              **Plain MapLibre events** (no drawing
+                                               library). Click to add waypoints only. Terra
+                                               Draw was considered and not needed.
 
   Road snapping                                **Valhalla**, `bus` costing, run locally in
                                                Docker. Hidden behind a small `Router`
@@ -359,8 +360,8 @@ Notes:
     the current user's `localStorage` and replicates it to the server. The copy gets an
     automatically generated number (see "Data model"), so there is no prompt and no
     collision.
--   The edit view is where the Terra Draw interactions are attached. The other two views
-    are read-only and never attach it.
+-   The edit view is where the editing interactions (click, drag, select) are attached.
+    The other two views are read-only and never attach them.
 
 Drawing and editing UX
 ----------------------
@@ -382,11 +383,17 @@ Click to add waypoints only. There is no freehand drawing.
     only the two endpoints, reversed (B then A), and the user adds intermediate waypoints.
     Seeding it with the reversed waypoints of path 0 is deferred (see the last section).
 -   A straight-line `Router` is available as a fallback when Valhalla is not running.
--   **Terra Draw timing:** adding waypoints (milestone 3) and dragging them (done in
-    milestone 5, at the user's request) use plain MapLibre events, since the app's own
-    waypoint list is the source of truth and the line is derived from it. Whether Terra
-    Draw is still worth adding for the rest of milestone 6 (insert on the line, delete) is
-    decided then; plain MapLibre may be enough.
+-   **No Terra Draw:** adding (milestone 3), dragging (milestone 5), and inserting,
+    selecting and deleting waypoints (milestone 6) all use plain MapLibre events. The app's
+    own waypoint list is the source of truth and the line is derived from it, so a drawing
+    library that owns its own geometry would only get in the way.
+-   **Insert:** clicking within a few pixels of a path's line inserts a waypoint on the line,
+    between the two waypoints around that spot, and selects it. Clicking a waypoint selects
+    it. Clicking empty map adds a waypoint at the end.
+-   **Delete:** the selected waypoint is deleted with the Delete key or the panel button.
+    On a loop, deleting the start makes the next waypoint the new start and re-closes the
+    loop. When a route has a return path, its endpoints cannot be deleted, because the two
+    paths share them; interior waypoints can always be deleted.
 
 Rendering
 ---------
@@ -489,7 +496,6 @@ Architecture
       lib/
         identity.ts     hardcoded username (client and server)
         map/            MapLibre setup, layers, styles
-        draw/           Terra Draw integration (edit view only)
         routing/        Router interface + Valhalla and straight-line implementations
         store/          Svelte stores for routes; localStorage and server sync
         geo/            GeoJSON types, route invariants, duplicate helper

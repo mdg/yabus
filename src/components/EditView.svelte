@@ -5,17 +5,26 @@
 	import RouteEditor from '#components/RouteEditor.svelte';
 	import {
 		appendWaypoint,
+		canDeleteWaypoint,
+		deleteWaypoint,
 		deriveGeometry,
+		insertWaypointOnRoute,
 		mergeGeometry,
 		moveWaypoint,
 		straightGeometry
 	} from '#lib/geo/edit.ts';
 	import { newRoute } from '#lib/geo/factory.ts';
+	import { isClosed } from '#lib/geo/loop.ts';
 	import { applyMetadata, type MetadataPatch } from '#lib/geo/meta.ts';
 	import { validateRouteNumber } from '#lib/geo/numbering.ts';
-	import type { Position, RouteCollection, RouteKind } from '#lib/geo/types.ts';
+	import type { Position, RouteCollection, RouteKind, WaypointRef } from '#lib/geo/types.ts';
 	import { username } from '#lib/identity.ts';
-	import { addRouteLayers, setRouteData, WAYPOINT_LAYER } from '#lib/map/routeLayers.ts';
+	import {
+		addRouteLayers,
+		LINE_LAYER,
+		setRouteData,
+		WAYPOINT_LAYER
+	} from '#lib/map/routeLayers.ts';
 	import { getRouter } from '#lib/routing/index.ts';
 	import { getLocalRoutes } from '#lib/store/localRoutes.ts';
 	import { takenRouteNumbers } from '#lib/store/takenNumbers.ts';
@@ -36,9 +45,21 @@
 	const meta = $derived(route.features[0].properties);
 	const waypointCount = $derived(meta.waypoints.length);
 
-	// Keep the map in step with the route.
+	// The selected waypoint, if any. It is dropped automatically once it no longer exists (after
+	// a delete, a cancelled drag, or a kind change).
+	let selected = $state.raw<WaypointRef | null>(null);
+	const selection = $derived.by(() => {
+		if (!selected) return null;
+		const exists = route.features[selected.path]?.properties.waypoints.some(
+			(w) => w.id === selected!.id
+		);
+		if (!exists) return null;
+		return { ref: selected, canDelete: canDeleteWaypoint(route, selected.path, selected.id) };
+	});
+
+	// Keep the map in step with the route and the selection.
 	$effect(() => {
-		if (map) setRouteData(map, route);
+		if (map) setRouteData(map, route, selection?.ref ?? null);
 	});
 
 	function persist(r: RouteCollection) {
@@ -79,6 +100,38 @@
 	}
 
 	const addWaypoint = (position: Position) => update(appendWaypoint(route, position), true);
+
+	/** On a closed loop the closing waypoint is the start's twin, so selecting either selects the start. */
+	function select(path: number, id: string) {
+		const waypoints = route.features[path]?.properties.waypoints ?? [];
+		const isLoop = route.features[path]?.properties.kind === 'loop';
+		if (isLoop && isClosed(waypoints) && waypoints[waypoints.length - 1].id === id) {
+			id = waypoints[0].id;
+		}
+		selected = { path, id };
+	}
+
+	function deleteSelected() {
+		if (!selection?.canDelete) return;
+		const { path, id } = selection.ref;
+		selected = null;
+		update(deleteWaypoint(route, path, id), true);
+	}
+
+	function onKeydown(e: KeyboardEvent) {
+		if (drag) return; // Esc during a drag is handled by the drag itself
+		// Do not steal Delete/Backspace/Esc from the text fields in the panel.
+		const target = e.target;
+		if (target instanceof Element && target.closest('input[type=text], textarea, select, [contenteditable=true]')) {
+			return;
+		}
+		if (e.key === 'Escape') {
+			selected = null;
+		} else if ((e.key === 'Delete' || e.key === 'Backspace') && selection) {
+			e.preventDefault();
+			deleteSelected();
+		}
+	}
 	const setName = (name: string) => update(applyMetadata(route, { name }), false);
 	const setColor = (color: string) => update(applyMetadata(route, { color }), false);
 
@@ -175,6 +228,7 @@
 			if (!feature) return;
 			e.preventDefault(); // stops the map from panning
 			latest++; // a line rebuild still in flight must not fight the drag
+			select(Number(feature.properties.path), String(feature.properties.id));
 			drag = {
 				path: Number(feature.properties.path),
 				id: String(feature.properties.id),
@@ -203,16 +257,33 @@
 
 		m.on('click', (e) => {
 			if (performance.now() < ignoreClickUntil) return;
-			// A click on an existing waypoint does not add another one on top of it.
 			const { x, y } = e.point;
-			const hits = m.queryRenderedFeatures(
-				[
-					[x - 8, y - 8],
-					[x + 8, y + 8]
-				],
-				{ layers: [WAYPOINT_LAYER] }
-			);
-			if (hits.length > 0) return;
+			const around = (r: number): [[number, number], [number, number]] => [
+				[x - r, y - r],
+				[x + r, y + r]
+			];
+
+			// 1. On a waypoint: select it (never add a second one on top of it).
+			const onWaypoint = m.queryRenderedFeatures(around(8), { layers: [WAYPOINT_LAYER] })[0];
+			if (onWaypoint) {
+				select(Number(onWaypoint.properties.path), String(onWaypoint.properties.id));
+				return;
+			}
+
+			// 2. On the line: insert a waypoint there, between its neighbours.
+			const lines = m.queryRenderedFeatures(around(6), { layers: [LINE_LAYER] });
+			if (lines.length > 0) {
+				const paths = [...new Set(lines.map((f) => Number(f.properties.path)))];
+				const inserted = insertWaypointOnRoute(route, [e.lngLat.lng, e.lngLat.lat], paths);
+				if (inserted) {
+					selected = { path: inserted.path, id: inserted.waypointId };
+					update(inserted.route, true);
+					return;
+				}
+			}
+
+			// 3. Anywhere else: add a waypoint at the end.
+			selected = null;
 			addWaypoint([e.lngLat.lng, e.lngLat.lat]);
 		});
 	}
@@ -238,6 +309,8 @@
 	}
 </script>
 
+<svelte:window onkeydown={onKeydown} />
+
 <div class="wrap">
 	<MapView {onready} />
 	<aside>
@@ -252,9 +325,21 @@
 			onrename={rename}
 		/>
 		<p class="count">{waypointCount} {waypointCount === 1 ? 'waypoint' : 'waypoints'}</p>
+		{#if selection}
+			<div class="selection">
+				<strong>Waypoint selected</strong>
+				<button type="button" onclick={deleteSelected} disabled={!selection.canDelete}>
+					Delete waypoint
+				</button>
+				{#if !selection.canDelete}
+					<small>Endpoints can't be deleted while the route has a return path.</small>
+				{/if}
+			</div>
+		{/if}
 		<p class="hint">
-			Click the map to add waypoints{meta.kind === 'loop' ? '. The loop closes automatically' : ''}.
-			Drag a waypoint to move it (Esc cancels).
+			Click the map to add a waypoint{meta.kind === 'loop' ? ' (the loop closes automatically)' : ''}.
+			Click the line to insert one. Click a waypoint to select it; Delete removes it. Drag a
+			waypoint to move it (Esc cancels).
 		</p>
 		{#if message}<p class="error" role="alert">{message}</p>{/if}
 	</aside>
@@ -290,6 +375,34 @@
 	}
 	.hint {
 		color: #555;
+		font-size: 13px;
+	}
+	.selection {
+		display: grid;
+		gap: 4px;
+		margin: 6px 0;
+		padding: 8px;
+		border-radius: 6px;
+		background: #fff8d6;
+		justify-items: start;
+	}
+	.selection button {
+		font: inherit;
+		font-size: 13px;
+		padding: 4px 10px;
+		border: 1px solid #c7a600;
+		border-radius: 5px;
+		background: #fff;
+		color: #b00020;
+		cursor: pointer;
+	}
+	.selection button:disabled {
+		color: #888;
+		border-color: #ccc;
+		cursor: default;
+	}
+	.selection small {
+		color: #666;
 	}
 	.error {
 		color: #b00020;

@@ -1,13 +1,16 @@
 import type { GeoJSONSource, Map as MapLibreMap } from 'maplibre-gl';
 import { contrastColor } from '#lib/geo/color.ts';
-import type { RouteCollection } from '#lib/geo/types.ts';
+import type { RouteCollection, WaypointRef } from '#lib/geo/types.ts';
 import { pathLines, waypointPoints } from './routeData.ts';
 
 const LINES = 'route-lines';
 const WAYPOINTS = 'route-waypoints';
 
-/** The waypoint markers. Edit-view interactions (hover, drag, click guard) target this layer. */
+/** The waypoint markers. Edit-view interactions (hover, drag, select) target this layer. */
 export const WAYPOINT_LAYER = WAYPOINTS;
+
+/** The colored route line. Clicking it inserts a waypoint. */
+export const LINE_LAYER = LINES;
 
 const empty = { type: 'FeatureCollection', features: [] } as const;
 
@@ -112,17 +115,26 @@ export function addRouteLayers(map: MapLibreMap): void {
 		type: 'circle',
 		source: WAYPOINTS,
 		paint: {
-			'circle-radius': ['case', ['get', 'endpoint'], 8, 6],
-			'circle-color': '#ffffff',
+			'circle-radius': [
+				'+',
+				['case', ['get', 'endpoint'], 8, 6],
+				['case', ['get', 'selected'], 3, 0]
+			],
+			// The selected waypoint is filled yellow so it stands out.
+			'circle-color': ['case', ['get', 'selected'], '#ffd60a', '#ffffff'],
 			'circle-stroke-color': ['get', 'color'],
 			'circle-stroke-width': 3
 		}
 	});
 }
 
-/** Replaces what the route layers show. Pass null to clear. */
-export function setRouteData(map: MapLibreMap, route: RouteCollection | null): void {
+/** Replaces what the route layers show. Pass a null route to clear. */
+export function setRouteData(
+	map: MapLibreMap,
+	route: RouteCollection | null,
+	selected: WaypointRef | null = null
+): void {
 	ensureArrowImages(map, route);
 	(map.getSource(LINES) as GeoJSONSource | undefined)?.setData(pathLines(route));
-	(map.getSource(WAYPOINTS) as GeoJSONSource | undefined)?.setData(waypointPoints(route));
+	(map.getSource(WAYPOINTS) as GeoJSONSource | undefined)?.setData(waypointPoints(route, selected));
 }

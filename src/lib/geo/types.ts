@@ -32,3 +32,9 @@ export interface RouteCollection {
 	type: 'FeatureCollection';
 	features: PathFeature[];
 }
+
+/** Points at one waypoint: the index of its path in the route, and the waypoint's id. */
+export interface WaypointRef {
+	path: number;
+	id: string;
+}
