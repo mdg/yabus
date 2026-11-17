@@ -25,14 +25,15 @@ A web app for drawing numbered bus routes on a map. Initial target area: **Hudso
 
 | Topic | Decision |
 |---|---|
-| Framework | **SvelteKit** (TypeScript). The server side is needed for the filesystem copy, so use a server adapter (`adapter-node`, or a Bun adapter) rather than `adapter-static`. |
+| Framework | **SvelteKit** (TypeScript). The server side is needed for the filesystem copy, so use a Bun-specific adapter (`svelte-adapter-bun`) rather than `adapter-static`. |
 | Package manager / runtime | **Bun** (`bun install`, `bun run dev`). Vite still does the dev server and build. |
 | Map rendering | **MapLibre GL JS** |
 | Drawing/editing | **Terra Draw** (MapLibre adapter) for interaction. Click to add waypoints only. |
 | Road snapping | **Valhalla**, `bus` costing, run locally in Docker. Hidden behind a small `Router` interface. |
 | Client persistence | **GeoJSON in `localStorage`** |
 | Server persistence | **GeoJSON files on the server filesystem**, keyed by username and ULID session ID. |
-| Target area | Hudson, Bergen and Essex Counties (NJ) and Manhattan (New York County, NY). |
+| Target area | Hudson County, NJ, with Bergen and Essex Counties (NJ) and Manhattan (New York County, NY) as its surroundings. No extra buffer beyond those counties. |
+| Valhalla region | A single **rectangular bounding box** enclosing all four counties (see "Local Docker setup"). |
 | Route direction model | Each route represents **one direction of travel**. See "Route model". |
 | Overlap within a route | A route's paths are drawn identically to a single route. Arrows show direction. |
 | Identity (for now) | Hardcoded username and session ID in one config module. |
@@ -157,7 +158,13 @@ Click to add waypoints only. There is no freehand drawing.
 - **Direction arrows:** `symbol` layer along each path. Each path has its own arrows, so the two paths of a bidirectional route show arrows in both directions where they share a street.
 - **Endpoints and waypoints:** `circle` layer for markers (waypoints shown only in the edit view).
 - **Overlap within a route:** no `line-offset`. The two paths of a bidirectional route, or a loop that overlaps itself, are drawn on top of each other and look like a single route. Only the arrows indicate direction.
-- **Overlap between different routes:** not decided. See open questions.
+- **Overlap between different routes:** drawn **side by side** using MapLibre's `line-offset` paint property, which shifts a line sideways by a number of pixels. Two caveats:
+  - `line-offset` is relative to the direction of the line, so a route traveling the opposite way on the same street flips sides. Offsets need to be assigned relative to a fixed side of the street, not each line's own direction.
+  - The offset is in screen pixels. Scale it with zoom (a `zoom` interpolate expression) so the lines stay adjacent to each other and the street at every zoom level.
+  - Approach, simplest first:
+    1. **Constant offset per route** in the composite view: give each route a fixed slot (0, 1, 2, ...) so the routes are always bundled side by side. This is easy, but routes shift slightly off their street where they do not overlap anything.
+    2. **Per-section offset:** detect the sections of road that routes share, split the lines there, and offset only those sections. This looks better but is more work, and the transitions at the ends of shared sections need care. Treat this as polish.
+  - Offsets apply between **different routes** only. The paths of a single route still draw on top of each other (see above).
 
 ## Routing (Valhalla)
 
@@ -173,7 +180,7 @@ Click to add waypoints only. There is no freehand drawing.
 - Run Valhalla locally in Docker (for example the `gis-ops/docker-valhalla` image, which builds tiles from `.pbf` files in a mounted folder).
 - **Optimized for the target region.** Do not build tiles for the whole US.
   1. Download the Geofabrik extracts for New Jersey and New York State.
-  2. Clip each to the target area with `osmium extract`. The area covers Hudson, Bergen and Essex Counties and Manhattan, plus a buffer so routes near the edges are not cut off.
+  2. Clip each to a rectangle with `osmium extract --bbox minLon,minLat,maxLon,maxLat`. The rectangle encloses Hudson, Bergen and Essex Counties and Manhattan. The counties themselves are the buffer around Hudson County, so no extra margin is added. Starting value (approximate, to be tightened against real county boundaries): `-74.42,40.63,-73.90,41.13`. The rectangle will also include slivers of neighboring areas (Union, Passaic and Rockland Counties, Brooklyn, Queens, Staten Island), which is acceptable.
   3. Merge the clipped files into one `.pbf` and mount it into the container.
 - Check in the scripts and a `docker-compose.yml` for this, but not the data or tiles. Keep those in a git-ignored folder.
 - Note that "Manhattan County" is New York County, NY, which is the name to use when looking up boundaries.
@@ -217,7 +224,7 @@ data/             server-side GeoJSON files (git-ignored)
 
 ## Milestones
 
-1. **Scaffold:** SvelteKit + TypeScript managed with Bun and a server adapter, with MapLibre showing a basemap of the target area.
+1. **Scaffold:** SvelteKit + TypeScript managed with Bun and `svelte-adapter-bun`, with MapLibre showing a basemap of the target area.
 2. **Identity and storage:** hardcoded identity module, `localStorage` store, and server GET/PUT endpoints writing to `data/{username}/{sessionId}.geojson`.
 3. **Edit view, straight lines:** click to add waypoints, derive a `LineString` using the straight-line `Router`, and render it with a color.
 4. **Route metadata:** number, name, color and kind (loop / point-to-point). Route list with select and delete.
@@ -234,10 +241,8 @@ data/             server-side GeoJSON files (git-ignored)
 - **Server file granularity:** one `{sessionId}.geojson` per user and session holding all routes (as written above), or one file per route?
 - **What a session is:** the plan treats a session as a named collection of a user's routes. Is that right, or should routes persist across sessions for a user?
 - **Sync conflicts:** on load, which copy wins when `localStorage` and the server differ? A simple default is to use `localStorage` for the owner and fall back to the server when it is empty. Other users always read from the server.
-- **Server adapter:** `adapter-node` or a Bun-specific adapter.
-- **Valhalla region:** exact bounding box or boundary polygon, and how large a buffer around the four counties.
 - **Intermediate waypoint type:** `through` vs. `break` for Valhalla locations.
-- **Basemap provider:** MapTiler, Stadia, or self-hosted Protomaps for the target area?
-- **Overlap between different routes:** drawn on top of each other, offset side by side, or something else?
+- **Basemap provider:** no self-hosting and no paid plan. Leading candidate is **OpenFreeMap** (free, no API key). MapTiler and Stadia free tiers are alternatives. Confirm current terms before committing.
+- **Overlap between different routes:** start with the constant per-route offset, or go straight to per-section offsets?
 - **Return-path UX:** how does the user add the second path? For example, a button that seeds it with the reversed waypoints of path 0 for them to adjust.
 - **Scale:** how many routes are expected? This matters for `localStorage` limits (about 5 MB).
