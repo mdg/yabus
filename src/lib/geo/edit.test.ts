@@ -1,8 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import { StraightLineRouter, type Router } from '#lib/routing/router.ts';
 import { pathLines, waypointPoints } from '#lib/map/routeData.ts';
-import { appendWaypoint, deriveGeometry, straightGeometry } from './edit.ts';
+import { appendWaypoint, deriveGeometry, moveWaypoint, straightGeometry } from './edit.ts';
 import { newRoute } from './factory.ts';
+import { applyMetadata } from './meta.ts';
 import { parseRoute } from './route.ts';
 
 describe('newRoute', () => {
@@ -96,5 +97,92 @@ describe('map data', () => {
 		r = newRoute('1');
 		r = appendWaypoint(r, [-74.1, 40.7]);
 		expect(waypointPoints(r).features[0].properties.endpoint).toBe(true);
+	});
+
+	test('tells each waypoint which path it belongs to, and lines get a readable label color', async () => {
+		const base = appendWaypoint(appendWaypoint(newRoute('1'), [-74.1, 40.7]), [-74.2, 40.8]);
+		const two = { ...base, features: [base.features[0], { ...base.features[0], id: 'ret' }] };
+		expect(waypointPoints(two).features.map((f) => f.properties.path)).toEqual([0, 0, 1, 1]);
+		const lines = pathLines(await deriveGeometry(base, new StraightLineRouter()));
+		expect(lines.features[0].properties.textColor).toBe('#ffffff'); // on the default red
+	});
+});
+
+describe('moveWaypoint', () => {
+	const A: [number, number] = [-74.1, 40.7];
+	const B: [number, number] = [-74.2, 40.8];
+	const C: [number, number] = [-74.3, 40.9];
+	const D: [number, number] = [-74.4, 41.0];
+	const ids = (r: ReturnType<typeof newRoute>, p = 0) => r.features[p].properties.waypoints.map((w) => w.id);
+	const at = (r: ReturnType<typeof newRoute>, p = 0) => r.features[p].properties.waypoints.map((w) => w.coordinates);
+
+	function drawn(...points: [number, number][]) {
+		let r = newRoute('1');
+		for (const p of points) r = appendWaypoint(r, p);
+		return r;
+	}
+
+	test('moves one interior waypoint and nothing else, without mutating', () => {
+		const before = drawn(A, B, C);
+		const after = moveWaypoint(before, 0, ids(before)[1], [-75.123456789, 41.5]);
+		expect(at(after)).toEqual([A, [-75.123457, 41.5], C]); // rounded to 6 places
+		expect(at(before)).toEqual([A, B, C]);
+		expect(ids(after)).toEqual(ids(before));
+	});
+
+	test('unknown path or id leaves the route unchanged', () => {
+		const r = drawn(A, B);
+		expect(moveWaypoint(r, 0, 'nope', C)).toBe(r);
+		expect(moveWaypoint(r, 5, ids(r)[0], C)).toBe(r);
+	});
+
+	test('on a closed loop the first and closing waypoints move together', () => {
+		const loop = applyMetadata(drawn(A, B, C), { kind: 'loop' }); // A B C A
+		const viaFirst = moveWaypoint(loop, 0, ids(loop)[0], D);
+		expect(at(viaFirst)).toEqual([D, B, C, D]);
+		const viaClosing = moveWaypoint(loop, 0, ids(loop)[3], D);
+		expect(at(viaClosing)).toEqual([D, B, C, D]);
+		expect(parseRoute(viaFirst).ok).toBe(true);
+		// an interior waypoint moves alone
+		expect(at(moveWaypoint(loop, 0, ids(loop)[1], D))).toEqual([A, D, C, A]);
+	});
+
+	function twoPaths() {
+		// path 0: A to B via M; path 1 (return): B to A via X
+		const M: [number, number] = [-74.15, 40.75];
+		const X: [number, number] = [-74.16, 40.72];
+		const base = drawn(A, M, B);
+		const ret = {
+			...drawn(B, X, A).features[0],
+			id: 'return',
+			properties: { ...drawn(B, X, A).features[0].properties, direction: 1 as const }
+		};
+		return { route: { ...base, features: [base.features[0], ret] }, M, X };
+	}
+
+	test('moving an endpoint also moves the matching endpoint of the other path', () => {
+		const { route, M, X } = twoPaths();
+		// move path 0's start (A): path 1's end moves too
+		let out = moveWaypoint(route, 0, ids(route, 0)[0], D);
+		expect(at(out, 0)).toEqual([D, M, B]);
+		expect(at(out, 1)).toEqual([B, X, D]);
+		expect(parseRoute(out).ok).toBe(true);
+		// move path 0's end (B): path 1's start moves too
+		out = moveWaypoint(route, 0, ids(route, 0)[2], D);
+		expect(at(out, 0)).toEqual([A, M, D]);
+		expect(at(out, 1)).toEqual([D, X, A]);
+		// and the other way around: path 1's start (B) moves path 0's end
+		out = moveWaypoint(route, 1, ids(route, 1)[0], D);
+		expect(at(out, 1)).toEqual([D, X, A]);
+		expect(at(out, 0)).toEqual([A, M, D]);
+		expect(parseRoute(out).ok).toBe(true);
+	});
+
+	test('moving an interior waypoint of one path leaves the other path alone', () => {
+		const { route, X } = twoPaths();
+		const out = moveWaypoint(route, 1, ids(route, 1)[1], D);
+		expect(at(out, 1)[1]).toEqual(D);
+		expect(at(out, 0)).toEqual(at(route, 0));
+		expect(X).toBeTruthy();
 	});
 });

@@ -382,10 +382,11 @@ Click to add waypoints only. There is no freehand drawing.
     only the two endpoints, reversed (B then A), and the user adds intermediate waypoints.
     Seeding it with the reversed waypoints of path 0 is deferred (see the last section).
 -   A straight-line `Router` is available as a fallback when Valhalla is not running.
--   **Terra Draw timing:** adding waypoints (milestone 3) uses a plain MapLibre click
-    handler, since the app's own waypoint list is the source of truth and the line is
-    derived from it. Terra Draw is introduced in milestone 6, where select, drag and delete
-    of waypoints are the part it helps with.
+-   **Terra Draw timing:** adding waypoints (milestone 3) and dragging them (done in
+    milestone 5, at the user's request) use plain MapLibre events, since the app's own
+    waypoint list is the source of truth and the line is derived from it. Whether Terra
+    Draw is still worth adding for the rest of milestone 6 (insert on the line, delete) is
+    decided then; plain MapLibre may be enough.
 
 Rendering
 ---------
@@ -524,8 +525,9 @@ Milestones
     numbering for new routes. Route list with select and delete. Reject duplicate numbers
     on rename.
 5.  **Labels and arrows:** route number and direction arrows rendered along each path.
-6.  **Waypoint editing:** drag, insert and delete waypoints. Enforce loop and endpoint
-    invariants.
+6.  **Waypoint editing:** insert and delete waypoints. Enforce loop and endpoint
+    invariants while doing so. (Dragging, with the loop-closing and two-path endpoint
+    rules, was done in milestone 5.)
 7.  **Sync rules:** replicate edits to the server, `localStorage` wins, server-only routes
     shown read-only.
 8.  **Valhalla:** local Docker setup for the target region, `/api/valhalla/route` proxy,

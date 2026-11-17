@@ -1,12 +1,13 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import { LngLatBounds, type Map } from 'maplibre-gl';
+	import { LngLatBounds, type Map, type MapLayerMouseEvent, type MapLayerTouchEvent } from 'maplibre-gl';
 	import MapView from '#components/Map.svelte';
 	import RouteEditor from '#components/RouteEditor.svelte';
 	import {
 		appendWaypoint,
 		deriveGeometry,
 		mergeGeometry,
+		moveWaypoint,
 		straightGeometry
 	} from '#lib/geo/edit.ts';
 	import { newRoute } from '#lib/geo/factory.ts';
@@ -14,7 +15,7 @@
 	import { validateRouteNumber } from '#lib/geo/numbering.ts';
 	import type { Position, RouteCollection, RouteKind } from '#lib/geo/types.ts';
 	import { username } from '#lib/identity.ts';
-	import { addRouteLayers, setRouteData } from '#lib/map/routeLayers.ts';
+	import { addRouteLayers, setRouteData, WAYPOINT_LAYER } from '#lib/map/routeLayers.ts';
 	import { getRouter } from '#lib/routing/index.ts';
 	import { getLocalRoutes } from '#lib/store/localRoutes.ts';
 	import { takenRouteNumbers } from '#lib/store/takenNumbers.ts';
@@ -113,11 +114,114 @@
 		await goto(`/u/${username}/${candidate}/edit`, { replaceState: true });
 	}
 
+	// Dragging a waypoint. While dragging, the markers and a straight-line preview follow the
+	// pointer. Nothing is saved or routed until the pointer is released.
+	interface Drag {
+		path: number;
+		id: string;
+		start: RouteCollection; // the route as it was when the drag began, for cancelling
+		moved: boolean;
+		origin: { x: number; y: number };
+	}
+	let drag: Drag | null = null;
+	let ignoreClickUntil = 0;
+
+	type PointerEventLike = { point: { x: number; y: number }; lngLat: { lng: number; lat: number } };
+
+	function wireInteractions(m: Map) {
+		const canvas = m.getCanvas();
+
+		const onMove = (e: PointerEventLike) => {
+			if (!drag) return;
+			if (!drag.moved) {
+				// Ignore tiny movements, so a plain click on a waypoint is not a drag.
+				if (Math.hypot(e.point.x - drag.origin.x, e.point.y - drag.origin.y) < 4) return;
+				drag.moved = true;
+			}
+			route = straightGeometry(
+				moveWaypoint(drag.start, drag.path, drag.id, [e.lngLat.lng, e.lngLat.lat])
+			);
+		};
+
+		const finish = () => {
+			m.off('mousemove', onMove);
+			m.off('touchmove', onMove);
+			window.removeEventListener('mouseup', onUp);
+			window.removeEventListener('touchend', onUp);
+			window.removeEventListener('keydown', onKey);
+			// The release produces a click; do not let it add a waypoint.
+			ignoreClickUntil = performance.now() + 300;
+			canvas.style.cursor = 'grab'; // the pointer is still over the marker
+		};
+
+		function onUp() {
+			if (!drag) return;
+			const d = drag;
+			drag = null;
+			finish();
+			if (d.moved) update(route, true); // save, and rebuild the line with the router
+		}
+
+		function onKey(e: KeyboardEvent) {
+			if (e.key !== 'Escape' || !drag) return;
+			const d = drag;
+			drag = null;
+			finish();
+			route = d.start; // cancel: put everything back
+		}
+
+		const begin = (e: MapLayerMouseEvent | MapLayerTouchEvent) => {
+			const feature = e.features?.[0];
+			if (!feature) return;
+			e.preventDefault(); // stops the map from panning
+			latest++; // a line rebuild still in flight must not fight the drag
+			drag = {
+				path: Number(feature.properties.path),
+				id: String(feature.properties.id),
+				start: route,
+				moved: false,
+				origin: { x: e.point.x, y: e.point.y }
+			};
+			canvas.style.cursor = 'grabbing';
+			m.on('mousemove', onMove);
+			m.on('touchmove', onMove);
+			window.addEventListener('mouseup', onUp);
+			window.addEventListener('touchend', onUp);
+			window.addEventListener('keydown', onKey);
+		};
+
+		m.on('mousedown', WAYPOINT_LAYER, begin);
+		m.on('touchstart', WAYPOINT_LAYER, (e) => {
+			if (e.points.length === 1) begin(e);
+		});
+		m.on('mouseenter', WAYPOINT_LAYER, () => {
+			if (!drag) canvas.style.cursor = 'grab';
+		});
+		m.on('mouseleave', WAYPOINT_LAYER, () => {
+			if (!drag) canvas.style.cursor = 'crosshair';
+		});
+
+		m.on('click', (e) => {
+			if (performance.now() < ignoreClickUntil) return;
+			// A click on an existing waypoint does not add another one on top of it.
+			const { x, y } = e.point;
+			const hits = m.queryRenderedFeatures(
+				[
+					[x - 8, y - 8],
+					[x + 8, y + 8]
+				],
+				{ layers: [WAYPOINT_LAYER] }
+			);
+			if (hits.length > 0) return;
+			addWaypoint([e.lngLat.lng, e.lngLat.lat]);
+		});
+	}
+
 	function onready(m: Map) {
 		addRouteLayers(m);
 		m.doubleClickZoom.disable(); // two quick clicks should add two waypoints, not zoom
 		m.getCanvas().style.cursor = 'crosshair';
-		m.on('click', (e) => addWaypoint([e.lngLat.lng, e.lngLat.lat]));
+		wireInteractions(m);
 
 		const waypoints = route.features.flatMap((f) => f.properties.waypoints);
 		if (waypoints.length > 0) {
@@ -150,6 +254,7 @@
 		<p class="count">{waypointCount} {waypointCount === 1 ? 'waypoint' : 'waypoints'}</p>
 		<p class="hint">
 			Click the map to add waypoints{meta.kind === 'loop' ? '. The loop closes automatically' : ''}.
+			Drag a waypoint to move it (Esc cancels).
 		</p>
 		{#if message}<p class="error" role="alert">{message}</p>{/if}
 	</aside>
