@@ -39,7 +39,7 @@ Decisions
   Topic                                        Decision
   -------------------------------------------- --------------------------------------------
   Framework                                    **SvelteKit** (TypeScript) with a
-                                               Bun-specific adapter (`svelte-adapter-bun`).
+                                               Bun-specific adapter (`@risk-tolerance/svelte-adapter-bun`, 2.x prerelease).
                                                The server side is needed for the filesystem
                                                copy, so `adapter-static` is not an option.
 
@@ -503,7 +503,7 @@ Architecture
 Milestones
 ----------
 
-1.  **Scaffold:** SvelteKit + TypeScript managed with Bun and `svelte-adapter-bun`, with
+1.  **Scaffold:** SvelteKit + TypeScript managed with Bun and `@risk-tolerance/svelte-adapter-bun`, with
     MapLibre showing the OpenFreeMap basemap centered on Hudson County.
 2.  **Identity, session and storage:** hardcoded username, generated ULID session IDs, session cookie,
     per-session directory creation, `localStorage` store, and the server endpoints writing to
