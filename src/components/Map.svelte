@@ -3,11 +3,13 @@
 	import { Map, NavigationControl, setWorkerUrl } from 'maplibre-gl';
 	import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url';
 	import { onMount } from 'svelte';
-	import { BASEMAP_STYLE_URL, INITIAL_CENTER, INITIAL_ZOOM } from '../lib/map/config';
+	import { BASEMAP_STYLE_URL, INITIAL_CENTER, INITIAL_ZOOM } from '#lib/map/config.ts';
 
 	// MapLibre 6 loads its worker from a separate file. Bundlers rename and move files, so point
 	// it at the emitted asset explicitly.
 	setWorkerUrl(workerUrl);
+
+	let { onready }: { onready?: (map: Map) => void } = $props();
 
 	let container: HTMLDivElement;
 
@@ -19,6 +21,8 @@
 			zoom: INITIAL_ZOOM
 		});
 		map.addControl(new NavigationControl(), 'top-right');
+		// Sources and layers can only be added once the style has loaded.
+		map.on('load', () => onready?.(map));
 
 		return () => map.remove();
 	});

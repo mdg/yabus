@@ -382,6 +382,10 @@ Click to add waypoints only. There is no freehand drawing.
     only the two endpoints, reversed (B then A), and the user adds intermediate waypoints.
     Seeding it with the reversed waypoints of path 0 is deferred (see the last section).
 -   A straight-line `Router` is available as a fallback when Valhalla is not running.
+-   **Terra Draw timing:** adding waypoints (milestone 3) uses a plain MapLibre click
+    handler, since the app's own waypoint list is the source of truth and the line is
+    derived from it. Terra Draw is introduced in milestone 6, where select, drag and delete
+    of waypoints are the part it helps with.
 
 Rendering
 ---------
