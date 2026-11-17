@@ -51,7 +51,7 @@
 							{#if r.source === 'local'}
 								<a href="/u/{username}/{r.number}/edit"><strong>{r.number}</strong> {r.name}</a>
 							{:else}
-								<span><strong>{r.number}</strong> {r.name}</span>
+								<a href="/u/{username}/{r.number}"><strong>{r.number}</strong> {r.name}</a>
 							{/if}
 							<small>
 								{r.kind === 'loop' ? 'Loop' : 'Point to point'}

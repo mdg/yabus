@@ -6,10 +6,10 @@ import type { PageLoad } from './$types';
 
 export const load: PageLoad = ({ params }) => {
 	if (!ROUTE_NUMBER_RE.test(params.routeNumber)) error(404, 'No such route');
-	// Only the owner edits, and only routes that are in their localStorage. The read-only view
-	// arrives in a later milestone; until then everything else goes back to the route list.
+	// Only the owner edits, and only routes that are in their localStorage. Everything else is
+	// shown read-only.
 	if (params.username !== username || !getLocalRoutes().has(params.routeNumber)) {
-		redirect(307, '/');
+		redirect(307, `/u/${encodeURIComponent(params.username)}/${encodeURIComponent(params.routeNumber)}`);
 	}
 	return { routeNumber: params.routeNumber };
 };

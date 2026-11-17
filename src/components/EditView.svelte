@@ -28,11 +28,14 @@
 	import { getRouter } from '#lib/routing/index.ts';
 	import { getLocalRoutes } from '#lib/store/localRoutes.ts';
 	import { takenRouteNumbers } from '#lib/store/takenNumbers.ts';
+	import { getReplicator } from '#lib/sync/index.ts';
+	import type { SyncStatus } from '#lib/sync/replicator.ts';
 
 	let { routeNumber }: { routeNumber: string } = $props();
 
 	const router = getRouter();
 	const store = getLocalRoutes();
+	const replicator = getReplicator();
 
 	// The route is replaced, never mutated, so a raw (non-proxied) state is enough. It also keeps
 	// proxies away from MapLibre. The page load guarantees the route exists in localStorage.
@@ -41,6 +44,10 @@
 	let map = $state.raw<Map>();
 	let message = $state<string | null>(null);
 	let numberError = $state<string | null>(null);
+	let syncStatus = $state<SyncStatus>('idle');
+
+	// Follow the replicator's status. The returned function unsubscribes when the view goes away.
+	$effect(() => replicator.subscribe((s) => (syncStatus = s)));
 
 	const meta = $derived(route.features[0].properties);
 	const waypointCount = $derived(meta.waypoints.length);
@@ -64,7 +71,8 @@
 
 	function persist(r: RouteCollection) {
 		try {
-			store.save(r);
+			store.save(r); // localStorage first: it is the source of truth
+			replicator.schedule(r); // then copy it to the server shortly after the last change
 			message = null;
 		} catch (e) {
 			message = e instanceof Error ? e.message : 'Could not save the route.';
@@ -163,6 +171,7 @@
 			return;
 		}
 		store.remove(current);
+		void replicator.rename(current, next); // server: save the new number, then drop the old
 		latest++; // drop anything still in flight for the old number
 		await goto(`/u/${username}/${candidate}/edit`, { replaceState: true });
 	}
@@ -342,6 +351,13 @@
 			waypoint to move it (Esc cancels).
 		</p>
 		{#if message}<p class="error" role="alert">{message}</p>{/if}
+		{#if syncStatus === 'error'}
+			<p class="error" role="status">
+				Couldn't save to the server. Your changes are kept in this browser.
+			</p>
+		{:else if syncStatus === 'saving'}
+			<p class="sync" role="status">Saving to the server…</p>
+		{/if}
 	</aside>
 </div>
 
@@ -406,5 +422,9 @@
 	}
 	.error {
 		color: #b00020;
+	}
+	.sync {
+		color: #666;
+		font-size: 12px;
 	}
 </style>

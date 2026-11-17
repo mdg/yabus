@@ -2,6 +2,7 @@
 	import { routeSummary } from '#lib/geo/route.ts';
 	import { username } from '#lib/identity.ts';
 	import { getLocalRoutes } from '#lib/store/localRoutes.ts';
+	import { getReplicator } from '#lib/sync/index.ts';
 
 	const store = getLocalRoutes();
 
@@ -20,6 +21,8 @@
 		const label = name && name !== `Route ${number}` ? `route ${number} (${name})` : `route ${number}`;
 		if (!confirm(`Delete ${label}? This cannot be undone.`)) return;
 		store.remove(number);
+		// If this fails the route may reappear as a read-only server copy later; that is accepted.
+		void getReplicator().remove(number);
 		routes = load();
 	}
 </script>

@@ -7,6 +7,7 @@
 	import { username } from '#lib/identity.ts';
 	import { getLocalRoutes } from '#lib/store/localRoutes.ts';
 	import { takenRouteNumbers } from '#lib/store/takenNumbers.ts';
+	import { getReplicator } from '#lib/sync/index.ts';
 
 	let busy = $state(false);
 	let error = $state<string | null>(null);
@@ -20,7 +21,9 @@
 			// never overwrite a route that only exists on the server.
 			const number = nextRouteNumber(await takenRouteNumbers());
 			const color = ROUTE_COLORS[store.list().length % ROUTE_COLORS.length];
-			store.save(newRoute(number, color));
+			const route = newRoute(number, color);
+			store.save(route);
+			void getReplicator().push(route); // claims the number on the server too
 			await goto(`/u/${username}/${number}/edit`);
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Could not create the route.';
