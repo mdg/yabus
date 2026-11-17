@@ -52,6 +52,14 @@ export function createLocalRoutes(
 			}
 		},
 
+		/** Every readable route, in natural number order. */
+		all(): RouteCollection[] {
+			return this.list().flatMap((n) => {
+				const route = this.get(n);
+				return route ? [route] : [];
+			});
+		},
+
 		has(routeNumber: string): boolean {
 			return this.get(routeNumber) !== null;
 		},

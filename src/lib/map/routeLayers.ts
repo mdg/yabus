@@ -1,7 +1,7 @@
 import type { GeoJSONSource, Map as MapLibreMap } from 'maplibre-gl';
 import { contrastColor } from '#lib/geo/color.ts';
 import type { RouteCollection, WaypointRef } from '#lib/geo/types.ts';
-import { pathLines, waypointPoints } from './routeData.ts';
+import { endpointPoints, pathLines, waypointPoints } from './routeData.ts';
 
 const LINES = 'route-lines';
 const WAYPOINTS = 'route-waypoints';
@@ -38,10 +38,12 @@ function arrowImage(color: string): ImageData {
 }
 
 /** Arrow images are per color, because routes can be any color. Add any that are missing. */
-function ensureArrowImages(map: MapLibreMap, route: RouteCollection | null): void {
-	for (const f of route?.features ?? []) {
-		const id = arrowId(f.properties.color);
-		if (!map.hasImage(id)) map.addImage(id, arrowImage(f.properties.color), { pixelRatio: 2 });
+function ensureArrowImages(map: MapLibreMap, routes: (RouteCollection | null)[]): void {
+	for (const route of routes) {
+		for (const f of route?.features ?? []) {
+			const id = arrowId(f.properties.color);
+			if (!map.hasImage(id)) map.addImage(id, arrowImage(f.properties.color), { pixelRatio: 2 });
+		}
 	}
 }
 
@@ -134,7 +136,17 @@ export function setRouteData(
 	route: RouteCollection | null,
 	selected: WaypointRef | null = null
 ): void {
-	ensureArrowImages(map, route);
+	ensureArrowImages(map, [route]);
 	(map.getSource(LINES) as GeoJSONSource | undefined)?.setData(pathLines(route));
 	(map.getSource(WAYPOINTS) as GeoJSONSource | undefined)?.setData(waypointPoints(route, selected));
+}
+
+/**
+ * Shows several routes at once (the composite view): every path's line, arrows and number, plus
+ * a marker at each path's endpoints. Waypoints in between are not shown.
+ */
+export function setCompositeData(map: MapLibreMap, routes: RouteCollection[]): void {
+	ensureArrowImages(map, routes);
+	(map.getSource(LINES) as GeoJSONSource | undefined)?.setData(pathLines(routes));
+	(map.getSource(WAYPOINTS) as GeoJSONSource | undefined)?.setData(endpointPoints(routes));
 }

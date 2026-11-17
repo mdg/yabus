@@ -14,24 +14,33 @@ export interface MapFeatureCollection {
 	}[];
 }
 
-/** One line per path that has a drawable line (2+ positions). `path` is the path's index. */
-export function pathLines(route: RouteCollection | null): MapFeatureCollection {
+type RoutesInput = RouteCollection | RouteCollection[] | null;
+const asList = (routes: RoutesInput): RouteCollection[] =>
+	routes === null ? [] : Array.isArray(routes) ? routes : [routes];
+
+/**
+ * One line per path that has a drawable line (2+ positions), for one route or several.
+ * `path` is the path's index within its route.
+ */
+export function pathLines(routes: RoutesInput): MapFeatureCollection {
 	return {
 		type: 'FeatureCollection',
-		features: (route?.features ?? [])
-			.map((f, path) => ({ f, path }))
-			.filter(({ f }) => f.geometry.coordinates.length >= 2)
-			.map(({ f, path }) => ({
-				type: 'Feature' as const,
-				geometry: f.geometry,
-				properties: {
-					path,
-					color: f.properties.color,
-					textColor: contrastColor(f.properties.color),
-					number: f.properties.number,
-					direction: f.properties.direction
-				}
-			}))
+		features: asList(routes).flatMap((route) =>
+			route.features
+				.map((f, path) => ({ f, path }))
+				.filter(({ f }) => f.geometry.coordinates.length >= 2)
+				.map(({ f, path }) => ({
+					type: 'Feature' as const,
+					geometry: f.geometry,
+					properties: {
+						path,
+						color: f.properties.color,
+						textColor: contrastColor(f.properties.color),
+						number: f.properties.number,
+						direction: f.properties.direction
+					}
+				}))
+		)
 	};
 }
 
@@ -67,4 +76,14 @@ export function waypointPoints(
 		});
 	});
 	return { type: 'FeatureCollection', features };
+}
+
+/** Only the endpoint markers (path starts and ends), for one route or several. */
+export function endpointPoints(routes: RoutesInput): MapFeatureCollection {
+	return {
+		type: 'FeatureCollection',
+		features: asList(routes).flatMap(
+			(route) => waypointPoints(route).features.filter((f) => f.properties.endpoint)
+		)
+	};
 }

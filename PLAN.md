@@ -352,7 +352,10 @@ Notes:
         server for routes not in `localStorage` (shown read-only).
     -   For any other user, the views read from the server only.
 -   **Composite for the current user:** routes from `localStorage` are shown as editable,
-    and server-only routes are shown with a read-only marker.
+    and server-only routes are shown with a read-only marker. When a number exists in both
+    places, the `localStorage` copy is shown and the server copy is dropped. The map shows
+    each path's line, arrows and number, with markers at path endpoints only (no interior
+    waypoints), fitted to all the routes.
 -   **Ownership check:** the server refuses `PUT` and `DELETE` for anyone without a valid
     session for that username. The client also hides edit controls for non-editable
     routes.
@@ -541,7 +544,10 @@ Milestones
 9.  **Return paths:** add a second path to a point-to-point route, with endpoints locked
     to the first path's.
 10. **Read-only route view and Duplicate.**
-11. **Composite view** of all of a user's routes.
+11. **Composite view** of all of a user's routes. (Built ahead of milestones 7 to 10. Until
+    the read-only route view exists in milestone 10, server-only routes in the list have no
+    link, and until the sync milestone replicates edits, the server only has routes that
+    were put there by other means.)
 
 Open questions
 --------------

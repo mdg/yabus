@@ -34,7 +34,10 @@
 	<MapView />
 	<aside>
 		<h1>yabus</h1>
-		<button type="button" class="new" onclick={createRoute} disabled={busy}>New route</button>
+		<div class="actions">
+			<button type="button" class="new" onclick={createRoute} disabled={busy}>New route</button>
+			<a href="/u/{username}">All routes on the map</a>
+		</div>
 		{#if error}<p class="error" role="alert">{error}</p>{/if}
 		<RouteList />
 	</aside>
@@ -61,6 +64,15 @@
 	h1 {
 		margin: 0 0 8px;
 		font-size: 18px;
+	}
+	.actions {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+	}
+	.actions a {
+		color: #0b57d0;
+		font-size: 13px;
 	}
 	.new {
 		font: inherit;
