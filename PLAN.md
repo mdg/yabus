@@ -10,14 +10,16 @@ A web app for drawing numbered bus routes on a map. Initial target area: **Hudso
 - Snap routes to roads using bus-appropriate routing that respects one-way streets.
 - Render routes with the route number labeled along the line and arrows showing direction of travel.
 - Provide three views: edit, read-only single route, and a composite of all of one user's routes.
-- Persist routes in `localStorage` and keep a copy of the GeoJSON on the server's filesystem.
+- Keep a user's routes in `localStorage` and replicate them to one GeoJSON file per route on the server's filesystem.
 
-## Non-goals (for now)
+## Non-goals for this plan
 
-- **Login and accounts.** Username and session ID are hardcoded. Login will be a separate plan.
-- **Import/export of GeoJSON files.** Not part of this plan.
-- **Route selection / filtering** in the composite view. Will be added later in a separate plan.
-- **Freehand line drawing.** Routes are only built from clicked waypoints.
+Items marked "later" are collected in "Deferred to later plans" at the bottom.
+
+- Login and accounts (later). Username and session ID are hardcoded.
+- Import/export of GeoJSON files (later).
+- Route selection / filtering in the composite view (later).
+- Freehand line drawing. Routes are only built from clicked waypoints. Not planned at all.
 - Schedules, timetables, or real transit feeds (GTFS).
 - Trip planning or rider-facing features.
 
@@ -25,18 +27,23 @@ A web app for drawing numbered bus routes on a map. Initial target area: **Hudso
 
 | Topic | Decision |
 |---|---|
-| Framework | **SvelteKit** (TypeScript). The server side is needed for the filesystem copy, so use a Bun-specific adapter (`svelte-adapter-bun`) rather than `adapter-static`. |
+| Framework | **SvelteKit** (TypeScript) with a Bun-specific adapter (`svelte-adapter-bun`). The server side is needed for the filesystem copy, so `adapter-static` is not an option. |
 | Package manager / runtime | **Bun** (`bun install`, `bun run dev`). Vite still does the dev server and build. |
 | Map rendering | **MapLibre GL JS** |
+| Basemap | **OpenFreeMap** (free, no API key, no self-hosting). |
 | Drawing/editing | **Terra Draw** (MapLibre adapter) for interaction. Click to add waypoints only. |
 | Road snapping | **Valhalla**, `bus` costing, run locally in Docker. Hidden behind a small `Router` interface. |
-| Client persistence | **GeoJSON in `localStorage`** |
-| Server persistence | **GeoJSON files on the server filesystem**, keyed by username and ULID session ID. |
-| Target area | Hudson County, NJ, with Bergen and Essex Counties (NJ) and Manhattan (New York County, NY) as its surroundings. No extra buffer beyond those counties. |
-| Valhalla region | A single **rectangular bounding box** enclosing all four counties (see "Local Docker setup"). |
+| Client persistence | **GeoJSON in `localStorage`**, one entry per route. |
+| Server persistence | **One GeoJSON file per route** on the server filesystem, plus a `session.json` per user. |
+| Source of truth | `localStorage` wins over the server. See "Sync rules". |
+| Target area | Hudson County, NJ, with Bergen, Essex (NJ), and Manhattan, Brooklyn, Queens and the Bronx (NY) as its surroundings. No extra buffer beyond those. |
+| Valhalla region | A single **rectangular bounding box** enclosing all of those counties. |
+| Scale | About 10 to 20 routes per user. |
 | Route direction model | Each route represents **one direction of travel**. See "Route model". |
 | Overlap within a route | A route's paths are drawn identically to a single route. Arrows show direction. |
-| Identity (for now) | Hardcoded username and session ID in one config module. |
+| Overlap between routes | Default rendering for now. Handled by a later plan. |
+| Session | A session is a logged-in user. The session ID is stored in a 30-day cookie. |
+| Identity (for now) | Hardcoded username and session ID. |
 
 ## Route model
 
@@ -53,7 +60,7 @@ Rules:
 - A route has **at most 2 endpoints**: A and B for point-to-point, or a single shared start/end point for a loop.
 - A bidirectional route **always uses the same two endpoints** for both paths. Path 1 starts where path 0 ends and ends where path 0 starts.
 - A route never has more than 2 paths.
-- Most routes will start with a single path. The second path is added later for routes where the return trip should be illustrated.
+- Most routes will start with a single path. A second path can be added later for routes where the return trip should be illustrated.
 - Paths are drawn independently, so the return path can use different streets. This matters because one-way streets often force a different return route.
 
 ### Invariants the app enforces
@@ -63,10 +70,11 @@ Rules:
 3. If there are 2 paths, `path1.first == path0.last` and `path1.last == path0.first`.
 4. Moving an endpoint in the UI moves it in the other path too. The user does not have to keep them in sync by hand.
 5. Intermediate waypoints can differ freely between the two paths.
+6. A user's route numbers are unique, since the number identifies the route and names its file.
 
 ## Data model
 
-Routes are stored as a GeoJSON `FeatureCollection`. **Each path is one `Feature`** with a `LineString` geometry. Features that belong to the same route share a `routeId`.
+A route is stored as a GeoJSON `FeatureCollection` with one `Feature` per path (one or two features). Each feature has a `LineString` geometry.
 
 ```jsonc
 {
@@ -74,10 +82,9 @@ Routes are stored as a GeoJSON `FeatureCollection`. **Each path is one `Feature`
   "id": "uuid",                      // path id
   "geometry": { "type": "LineString", "coordinates": [[lng, lat], ...] },
   "properties": {
-    "routeId": "uuid",               // shared by both paths of a route
     "kind": "loop",                  // "loop" | "point-to-point"
     "direction": 0,                  // 0 = primary (A to B), 1 = return (B to A); always 0 for loops
-    "number": "42",                  // string, since routes can be "42X" or "N3"
+    "number": "42",                  // string, since routes can be "42X" or "N3"; unique per user
     "name": "Downtown Loop",
     "color": "#e63946",
     "waypoints": [                   // user-placed points the line is built from
@@ -91,30 +98,63 @@ Notes:
 
 - `waypoints` are the source of truth. `geometry` is derived from them, either as a road-snapped path from Valhalla or as straight segments.
 - Endpoints are derived: the first and last waypoint of the path. They are not stored separately.
-- `number`, `name`, `color` and `kind` are route-level fields duplicated onto each path feature, because GeoJSON has no grouping. The app treats the `routeId` group as the unit and keeps these fields in sync when editing.
-- Ownership comes from where the data is stored (the username in the storage key and server path), not from a property on the feature.
+- `number`, `name`, `color` and `kind` are route-level fields duplicated onto each path feature, because GeoJSON has no grouping. The app keeps them in sync when editing.
+- **The route number is the route's identity** within a user's collection. It is used in URLs and file names. It must be file-name safe, for example `^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$`.
+- Changing a route's number is a rename: the new entry is saved and the old one removed, in both `localStorage` and on the server.
+- Ownership comes from where the data is stored (the username in the `localStorage` key and server path), not from a property on the feature.
 
-## Identity and storage
+## Identity, sessions and storage
 
-### Hardcoded identity
+### Hardcoded identity (temporary)
 
-A single module (for example `src/lib/identity.ts`) exports the hardcoded `username` and `sessionId` (a ULID). Everything that needs identity reads it from there, so the future login plan only has to replace that module.
+- `src/lib/identity.ts` exports the hardcoded `username`. The client needs it for `localStorage` keys and URLs.
+- `src/lib/server/identity.ts` exports the hardcoded `username` and `sessionId` (a ULID) for the server only.
+- The future login plan replaces these two modules.
 
-### localStorage
+### Session cookie
 
-- Key: `yabus:routes:v1:{username}:{sessionId}`, holding the user's `FeatureCollection`.
-- The version suffix leaves room for migrations.
-- This is the client's working copy.
+- A session is a logged-in user. The session ID is a ULID.
+- The server (in `hooks.server.ts`) sets a cookie carrying the session ID: `Max-Age=2592000` (30 days), `Path=/`, `HttpOnly`, `SameSite=Lax`, and `Secure` in production.
+- For now the server sets the cookie with the hardcoded session ID when it is missing.
+- `data/{username}/session.json` records the user's current session ID, for example `{ "sessionId": "01J..." }`. It is created on first use from the hardcoded values.
+- To authorize a write, the server checks that the cookie's session ID matches `session.json` for the username in the request path.
+
+### localStorage (client)
+
+- One entry per route: `yabus:route:v1:{username}:{routeNumber}`, holding that route's `FeatureCollection`. The version segment leaves room for migrations.
+- `localStorage` only ever holds the **current browser user's own routes**.
+- Routes that exist only on the server are never copied into `localStorage`.
+- At 10 to 20 routes per user, the roughly 5 MB limit is not a concern.
 
 ### Server filesystem
 
-- Layout: `data/{username}/{sessionId}.geojson`. The `data/` directory is git-ignored.
-- SvelteKit server endpoints:
-  - `GET /api/routes/{username}/{sessionId}` returns the file.
-  - `PUT /api/routes/{username}/{sessionId}` replaces the file. Only allowed when `{username}` matches the current user.
-- The client saves to `localStorage` immediately and PUTs to the server on a debounce.
-- Validate `username` and `sessionId` (character set, ULID format) before using them in paths, to prevent path traversal.
+```
+data/                         (git-ignored)
+  {username}/
+    session.json
+    {routeNumber}.geojson     one file per route
+```
+
+SvelteKit server endpoints:
+
+- `GET /api/users/{username}/routes` lists the user's route numbers (and their summaries).
+- `GET /api/users/{username}/routes/{routeNumber}` returns a route's GeoJSON. No authorization needed, since read-only views are public.
+- `PUT /api/users/{username}/routes/{routeNumber}` creates or replaces a route. Requires a valid session for that user.
+- `DELETE /api/users/{username}/routes/{routeNumber}` deletes a route. Requires a valid session for that user.
+
+Server rules:
+
+- Validate `username` and `routeNumber` against strict patterns before using them in paths, to prevent path traversal.
 - Writes are atomic (write to a temp file, then rename).
+- Validate the route invariants server-side before saving.
+
+### Sync rules
+
+1. **`localStorage` wins.** If a route exists in both places and they differ, the `localStorage` version is used and replicated to the server, overwriting it.
+2. **Edits require `localStorage`.** A user edit only succeeds if the route exists in `localStorage`. The edit is applied to the `localStorage` copy first, then replicated to the server (debounced `PUT`).
+3. **Server-only routes are read-only.** A route that exists on the server but not in `localStorage` is displayed read-only. It is never replicated into `localStorage`. This includes the current user's own routes if `localStorage` was cleared or they are on a different browser.
+4. **Duplicate is the way to get an editable copy.** Duplicating a route (from the read-only view) creates a new route in the current user's `localStorage`, which is then replicated to the server.
+5. **Delete** removes the `localStorage` entry and sends a `DELETE` to the server.
 
 ## Views
 
@@ -122,20 +162,24 @@ All three views share the same map component and layer styling. They differ in i
 
 | View | Who can use it | What it shows | Interaction |
 |---|---|---|---|
-| **Edit** | Only the creating user | One route | Full editing. |
+| **Edit** | Only the creating user, and only for routes in their `localStorage` | One route | Full editing. |
 | **Read-only route** | Any user | One route | None. A **Duplicate** button creates a new route owned by the current user. |
-| **Composite** | Any user viewing a given user's routes | All of one user's routes | None for now (selection comes later). |
+| **Composite** | Any user viewing a given user's routes | All of one user's routes | None for now. |
 
 Proposed URLs:
 
-- `/u/{username}/{sessionId}` is the composite view.
-- `/u/{username}/{sessionId}/{routeId}` is the read-only route view.
-- `/u/{username}/{sessionId}/{routeId}/edit` is the edit view. It redirects to the read-only view if the current user is not the owner.
+- `/u/{username}` is the composite view.
+- `/u/{username}/{routeNumber}` is the read-only route view.
+- `/u/{username}/{routeNumber}/edit` is the edit view. It redirects to the read-only view when the route is not editable (not the owner, or not in `localStorage`).
 
 Notes:
 
-- **Ownership check:** compared on the server (PUT is refused for non-owners) and on the client (to hide edit controls). With a hardcoded identity this is always satisfied for now, but the logic is built in from the start.
-- **Duplicate:** copies the route's path features with a new `routeId` and new path and waypoint ids, adds them to the current user's collection, and opens the new route in the edit view.
+- **Data sources:**
+  - For the current user, the views use `localStorage` first, and fall back to the server for routes not in `localStorage` (shown read-only).
+  - For any other user, the views read from the server only.
+- **Composite for the current user:** routes from `localStorage` are shown as editable, and server-only routes are shown with a read-only marker.
+- **Ownership check:** the server refuses `PUT` and `DELETE` for anyone without a valid session for that username. The client also hides edit controls for non-editable routes.
+- **Duplicate:** copies the route's path features with new path and waypoint ids into the current user's `localStorage` and replicates it to the server. If the current user already has a route with the same number, they must pick a different number before saving.
 - The edit view is where the Terra Draw interactions are attached. The other two views are read-only and never attach it.
 
 ## Drawing and editing UX
@@ -148,23 +192,19 @@ Click to add waypoints only. There is no freehand drawing.
 - Select a waypoint and delete it.
 - For a loop, the closing point is the first waypoint. The app adds the matching last waypoint automatically.
 - For point-to-point routes, the first and last waypoint are the endpoints. Moving an endpoint also moves it on the other path (invariant 4).
-- "Snapping" here means snapping the line to roads through Valhalla. Waypoints themselves are also snapped to the nearest routable road location by Valhalla.
+- "Snapping" means snapping the line to roads through Valhalla. Waypoints are also snapped to the nearest routable road location by Valhalla.
+- **Adding a return path:** a point-to-point route can get a second path. It starts with only the two endpoints, reversed (B then A), and the user adds intermediate waypoints. Seeding it with the reversed waypoints of path 0 is deferred (see the last section).
 - A straight-line `Router` is available as a fallback when Valhalla is not running.
 
 ## Rendering
 
+- **Basemap:** OpenFreeMap vector tiles. Start with its `liberty` style (`https://tiles.openfreemap.org/styles/liberty`), and show the required attribution (OpenFreeMap, OpenMapTiles, OpenStreetMap contributors).
 - **Route lines:** `line` layer, `line-color` from `["get", "color"]`.
 - **Route labels:** `symbol` layer with `symbol-placement: "line"` and `text-field: ["get", "number"]`.
 - **Direction arrows:** `symbol` layer along each path. Each path has its own arrows, so the two paths of a bidirectional route show arrows in both directions where they share a street.
 - **Endpoints and waypoints:** `circle` layer for markers (waypoints shown only in the edit view).
-- **Overlap within a route:** no `line-offset`. The two paths of a bidirectional route, or a loop that overlaps itself, are drawn on top of each other and look like a single route. Only the arrows indicate direction.
-- **Overlap between different routes:** drawn **side by side** using MapLibre's `line-offset` paint property, which shifts a line sideways by a number of pixels. Two caveats:
-  - `line-offset` is relative to the direction of the line, so a route traveling the opposite way on the same street flips sides. Offsets need to be assigned relative to a fixed side of the street, not each line's own direction.
-  - The offset is in screen pixels. Scale it with zoom (a `zoom` interpolate expression) so the lines stay adjacent to each other and the street at every zoom level.
-  - Approach, simplest first:
-    1. **Constant offset per route** in the composite view: give each route a fixed slot (0, 1, 2, ...) so the routes are always bundled side by side. This is easy, but routes shift slightly off their street where they do not overlap anything.
-    2. **Per-section offset:** detect the sections of road that routes share, split the lines there, and offset only those sections. This looks better but is more work, and the transitions at the ends of shared sections need care. Treat this as polish.
-  - Offsets apply between **different routes** only. The paths of a single route still draw on top of each other (see above).
+- **Overlap within a route:** no offset. The two paths of a bidirectional route, or a loop that overlaps itself, are drawn on top of each other and look like a single route. Only the arrows indicate direction.
+- **Overlap between different routes:** default rendering (drawn on top of each other). A later plan handles it.
 
 ## Routing (Valhalla)
 
@@ -172,18 +212,30 @@ Click to add waypoints only. There is no freehand drawing.
 - Send the path's waypoints as `locations`. For a loop, the first and last location are the same point.
 - Valhalla returns the shape as an encoded polyline with 6 digits of precision. Decode it into the path's `LineString`.
 - Each path is routed on its own. The return path of a bidirectional route is a separate request with its own waypoints, so it naturally follows one-way streets in the opposite direction.
-- Use `"type": "through"` for intermediate waypoints so the route passes through them without treating them as stops that split the trip. Revisit this choice during implementation.
-- The SvelteKit server proxies Valhalla (`/api/route`), so the browser does not need CORS access to the Docker container.
+- **Location types:**
+  - The first and last locations use `break` (the default). They start and end the route.
+  - Intermediate waypoints use `through`. The route must pass through them, without a U-turn and without splitting the result into separate legs.
+  - Valhalla's four types differ in two ways: whether a U-turn is allowed at the location, and whether it creates a leg boundary.
+
+    | Type | U-turn allowed | Creates a leg |
+    |---|---|---|
+    | `break` | yes | yes |
+    | `through` | no | no |
+    | `via` | yes | no |
+    | `break_through` | no | yes |
+
+  - `through` is the default choice for a bus line. Revisit it if it causes failed routes or odd detours, for example when a waypoint is placed on a dead-end one-way street.
+- The SvelteKit server proxies Valhalla (`/api/valhalla/route`), so the browser does not need CORS access to the Docker container.
 
 ### Local Docker setup
 
 - Run Valhalla locally in Docker (for example the `gis-ops/docker-valhalla` image, which builds tiles from `.pbf` files in a mounted folder).
 - **Optimized for the target region.** Do not build tiles for the whole US.
   1. Download the Geofabrik extracts for New Jersey and New York State.
-  2. Clip each to a rectangle with `osmium extract --bbox minLon,minLat,maxLon,maxLat`. The rectangle encloses Hudson, Bergen and Essex Counties and Manhattan. The counties themselves are the buffer around Hudson County, so no extra margin is added. Starting value (approximate, to be tightened against real county boundaries): `-74.42,40.63,-73.90,41.13`. The rectangle will also include slivers of neighboring areas (Union, Passaic and Rockland Counties, Brooklyn, Queens, Staten Island), which is acceptable.
+  2. Clip each to a rectangle with `osmium extract --bbox minLon,minLat,maxLon,maxLat`. The rectangle encloses Hudson, Bergen and Essex Counties, Manhattan (New York County), Brooklyn (Kings County), Queens, and the Bronx. Those counties are the buffer around Hudson County, so no extra margin is added. Starting value (approximate, to be tightened against real county boundaries): `-74.42,40.54,-73.70,41.13`. The rectangle will also include some neighboring areas (parts of Staten Island, Union, Passaic and Rockland Counties, Westchester, and Nassau), which is acceptable.
   3. Merge the clipped files into one `.pbf` and mount it into the container.
 - Check in the scripts and a `docker-compose.yml` for this, but not the data or tiles. Keep those in a git-ignored folder.
-- Note that "Manhattan County" is New York County, NY, which is the name to use when looking up boundaries.
+- County names for boundary lookups: "Manhattan" is New York County, "Brooklyn" is Kings County. Queens and the Bronx are Queens County and Bronx County.
 
 ### Router interface
 
@@ -199,50 +251,64 @@ The Valhalla implementation sits behind this. A straight-lines implementation is
 
 ```
 src/
+  hooks.server.ts   sets the session cookie
   lib/
-    identity.ts   hardcoded username and sessionId
-    map/          MapLibre setup, layers, styles
-    draw/         Terra Draw integration (edit view only)
-    routing/      Router interface + Valhalla and straight-line implementations
-    store/        Svelte stores for routes; localStorage sync and server sync
-    geo/          GeoJSON types, route invariants, duplicate helper
-    server/       Filesystem storage helpers (server only), input validation
+    identity.ts     hardcoded username (client and server)
+    map/            MapLibre setup, layers, styles
+    draw/           Terra Draw integration (edit view only)
+    routing/        Router interface + Valhalla and straight-line implementations
+    store/          Svelte stores for routes; localStorage and server sync
+    geo/            GeoJSON types, route invariants, duplicate helper
+    server/
+      identity.ts   hardcoded username and sessionId (server only)
+      storage.ts    filesystem helpers, input validation, atomic writes
   routes/
-    u/[username]/[sessionId]/+page.svelte                  composite view
-    u/[username]/[sessionId]/[routeId]/+page.svelte        read-only route view
-    u/[username]/[sessionId]/[routeId]/edit/+page.svelte   edit view
-    api/routes/[username]/[sessionId]/+server.ts           GET / PUT geojson
-    api/route/+server.ts                                   Valhalla proxy
+    u/[username]/+page.svelte                          composite view
+    u/[username]/[routeNumber]/+page.svelte            read-only route view
+    u/[username]/[routeNumber]/edit/+page.svelte       edit view
+    api/users/[username]/routes/+server.ts             GET list
+    api/users/[username]/routes/[routeNumber]/+server.ts   GET / PUT / DELETE
+    api/valhalla/route/+server.ts                      Valhalla proxy
   components/
     Map.svelte
     RouteList.svelte
     RouteEditor.svelte    number / name / color / kind form
 infra/
-  valhalla/       docker-compose.yml and extract scripts
-data/             server-side GeoJSON files (git-ignored)
+  valhalla/         docker-compose.yml and extract scripts
+data/               server-side files (git-ignored)
 ```
 
 ## Milestones
 
-1. **Scaffold:** SvelteKit + TypeScript managed with Bun and `svelte-adapter-bun`, with MapLibre showing a basemap of the target area.
-2. **Identity and storage:** hardcoded identity module, `localStorage` store, and server GET/PUT endpoints writing to `data/{username}/{sessionId}.geojson`.
+1. **Scaffold:** SvelteKit + TypeScript managed with Bun and `svelte-adapter-bun`, with MapLibre showing the OpenFreeMap basemap centered on Hudson County.
+2. **Identity, session and storage:** hardcoded identity modules, session cookie, `session.json`, `localStorage` store, and the server endpoints writing to `data/{username}/`.
 3. **Edit view, straight lines:** click to add waypoints, derive a `LineString` using the straight-line `Router`, and render it with a color.
-4. **Route metadata:** number, name, color and kind (loop / point-to-point). Route list with select and delete.
+4. **Route metadata:** number, name, color and kind (loop / point-to-point). Route list with select and delete. Enforce unique numbers.
 5. **Labels and arrows:** route number and direction arrows rendered along each path.
 6. **Waypoint editing:** drag, insert and delete waypoints. Enforce loop and endpoint invariants.
-7. **Valhalla:** local Docker setup for the target region, `/api/route` proxy, and the Valhalla `Router` with `bus` costing.
-8. **Return paths:** add an optional second path to a point-to-point route, with endpoints locked to the first path's.
-9. **Read-only route view and Duplicate.**
-10. **Composite view** of all of a user's routes.
-11. **Polish:** undo/redo, keyboard shortcuts.
+7. **Sync rules:** replicate edits to the server, `localStorage` wins, server-only routes shown read-only.
+8. **Valhalla:** local Docker setup for the target region, `/api/valhalla/route` proxy, and the Valhalla `Router` with `bus` costing.
+9. **Return paths:** add a second path to a point-to-point route, with endpoints locked to the first path's.
+10. **Read-only route view and Duplicate.**
+11. **Composite view** of all of a user's routes.
 
 ## Open questions
 
-- **Server file granularity:** one `{sessionId}.geojson` per user and session holding all routes (as written above), or one file per route?
-- **What a session is:** the plan treats a session as a named collection of a user's routes. Is that right, or should routes persist across sessions for a user?
-- **Sync conflicts:** on load, which copy wins when `localStorage` and the server differ? A simple default is to use `localStorage` for the owner and fall back to the server when it is empty. Other users always read from the server.
-- **Intermediate waypoint type:** `through` vs. `break` for Valhalla locations.
-- **Basemap provider:** no self-hosting and no paid plan. Leading candidate is **OpenFreeMap** (free, no API key). MapTiler and Stadia free tiers are alternatives. Confirm current terms before committing.
-- **Overlap between different routes:** start with the constant per-route offset, or go straight to per-section offsets?
-- **Return-path UX:** how does the user add the second path? For example, a button that seeds it with the reversed waypoints of path 0 for them to adjust.
-- **Scale:** how many routes are expected? This matters for `localStorage` limits (about 5 MB).
+- **Duplicate collisions:** when the duplicated route's number already exists in the current user's collection, should the app prompt for a new number or auto-suffix one (for example `42-2`)?
+- **Delete replication:** if the server `DELETE` fails (for example the server is down), the route would reappear as a read-only server-only route on the next load. Acceptable, or retry later?
+- **Valhalla bounding box:** tighten the rectangle against real county boundaries.
+
+## Deferred to later plans
+
+These were raised during planning but are intentionally not part of this plan.
+
+- **Login and accounts.** Replace the hardcoded identity modules, issue the session cookie on login, and write `session.json` from real sessions.
+- **Return-path seeding.** A button on a one-way point-to-point route that creates the return path pre-filled with the reversed waypoints of path 0, for the user to adjust.
+- **Overlap between different routes.** Draw routes that share a street side by side using MapLibre's `line-offset`.
+  - A constant offset per route is the simple version. Per-section offsets, which detect shared stretches of road, are the better version.
+  - `line-offset` is relative to each line's direction, so routes traveling opposite ways on the same street flip sides unless compensated.
+  - The offset is in screen pixels, so it needs to scale with zoom.
+- **Route selection / filtering** in the composite view.
+- **GeoJSON import/export.**
+- **Restoring routes from the server into `localStorage`**, for example after clearing browser data or on a new browser. For now those routes are read-only and Duplicate is the workaround.
+- **Undo/redo and keyboard shortcuts** in the edit view.
